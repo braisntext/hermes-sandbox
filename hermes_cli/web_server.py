@@ -4319,6 +4319,94 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     return FileResponse(target, media_type=media_type)
 
 
+# ---------------------------------------------------------------------------
+# Delegate API — async task delegation for external orchestrators
+# ---------------------------------------------------------------------------
+
+class _DelegateRequest(BaseModel):
+    task_id: str
+    prompt: str
+    webhook_url: str
+
+
+@app.post("/api/delegate", status_code=202)
+async def post_delegate(body: _DelegateRequest):
+    """Accept a task from an external orchestrator and execute it asynchronously.
+
+    Returns 202 immediately. When the agent finishes, POSTs the result to
+    ``webhook_url`` with ``{"task_id", "status", "response", "error"}``.
+    """
+    asyncio.create_task(_delegate_background(body.task_id, body.prompt, body.webhook_url))
+    return {"task_id": body.task_id, "status": "accepted"}
+
+
+async def _delegate_background(task_id: str, prompt: str, webhook_url: str) -> None:
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, _run_delegate_agent, task_id, prompt)
+        payload: dict = {
+            "task_id": task_id,
+            "status": "error" if result.get("error") else "completed",
+            "response": result.get("final_response", ""),
+        }
+        if result.get("error"):
+            payload["error"] = result["error"]
+    except Exception as exc:
+        _log.exception("Delegate background task failed for task_id=%s", task_id)
+        payload = {"task_id": task_id, "status": "error", "error": str(exc)}
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.post(webhook_url, json=payload)
+    except Exception:
+        _log.exception(
+            "Delegate webhook delivery failed for task_id=%s to %s", task_id, webhook_url
+        )
+
+
+def _run_delegate_agent(task_id: str, prompt: str) -> dict:
+    """Synchronous agent runner — called inside a thread-pool executor."""
+    import uuid
+    from run_agent import AIAgent
+    from hermes_cli.config import load_config
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    config = load_config()
+    model_cfg = config.get("model")
+    default_model = ""
+    config_provider = None
+    if isinstance(model_cfg, dict):
+        default_model = str(model_cfg.get("default") or "")
+        config_provider = model_cfg.get("provider")
+    elif isinstance(model_cfg, str) and model_cfg.strip():
+        default_model = model_cfg.strip()
+
+    kwargs: Dict[str, Any] = {
+        "platform": "api",
+        "quiet_mode": True,
+        "session_id": task_id or str(uuid.uuid4()),
+        "model": default_model,
+    }
+    try:
+        runtime = resolve_runtime_provider(requested=config_provider)
+        kwargs.update(
+            {
+                "provider": runtime.get("provider"),
+                "api_mode": runtime.get("api_mode"),
+                "base_url": runtime.get("base_url"),
+                "api_key": runtime.get("api_key"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+            }
+        )
+    except Exception:
+        _log.debug("Delegate falling back to default provider resolution", exc_info=True)
+
+    agent = AIAgent(**kwargs)
+    return agent.run_conversation(user_message=prompt, task_id=task_id)
+
+
 def _mount_plugin_api_routes():
     """Import and mount backend API routes from plugins that declare them.
 

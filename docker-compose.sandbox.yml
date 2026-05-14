@@ -1,0 +1,56 @@
+#
+# docker-compose.sandbox.yml — Hermes sandbox evaluation environment
+#
+# Usage:
+#   HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose -f docker-compose.sandbox.yml up -d
+#
+# Fill in .env.sandbox with at least one LLM provider key before starting.
+# All data (config, logs, sessions, skills) is stored in ./workspace_test
+# and never touches ~/.hermes on the host.
+#
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hermes-agent-sandbox
+    container_name: hermes-sandbox
+    restart: unless-stopped
+    env_file:
+      - .env.sandbox
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # Dashboard is launched as a sidecar inside the same container
+      # so we don't need a second service. It binds to 0.0.0.0:9119
+      # inside the container and is reachable at http://localhost:9119.
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+    volumes:
+      - ./workspace_test:/opt/data
+      # --- PROYECTOS DELEGADOS AL ARCHITECT (Nuevos Volúmenes) ---
+      - /Users/brais/VSCODE/FinView:/workspace/FinView
+      - /Users/brais/VSCODE/WorldHawk:/workspace/WorldHawk
+      - /Users/brais/VSCODE/grow-shop:/workspace/grow-shop
+      - /Users/brais/VSCODE/bl-site-package:/workspace/bl-site-package
+      - /Users/brais/VSCODE/biglobster:/workspace/biglobster
+
+      # Isolated data volume — replaces ~/.hermes on a normal install.
+      # All config, logs, sessions, skills, and crons land here.
+      - ./workspace_test:/opt/data
+    ports:
+      # Dashboard UI
+      - "127.0.0.1:9119:9119"
+      # OpenAI-compatible API server (disabled by default; enable below)
+      # - "127.0.0.1:8080:8080"
+    networks:
+      - hermes-net
+    # Run `gateway run` — starts the agent gateway (Telegram/Slack/etc.)
+    # For interactive CLI evaluation, swap this for: ["sleep", "infinity"]
+    # then exec in: docker exec -it hermes-sandbox hermes chat
+    command: ["gateway", "run"]
+
+networks:
+  hermes-net:
+    driver: bridge
