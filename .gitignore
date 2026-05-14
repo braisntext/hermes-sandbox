@@ -72,3 +72,5 @@ website/static/api/skills-index.json
 models-dev-upstream/
 .env.sandbox
 workspace_test/
+.env.sandbox
+workspace_test/
