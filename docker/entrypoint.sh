@@ -75,9 +75,42 @@ if [ ! -f "$HERMES_HOME/.env" ]; then
     cp "$INSTALL_DIR/.env.example" "$HERMES_HOME/.env"
 fi
 
+# Inject Zeabur (process) env vars into .env on every boot.
+# env_loader.py uses load_dotenv(override=True), so the .env file wins over
+# the process environment. We sync the values here so Zeabur-injected vars
+# (OPENROUTER_API_KEY, HERMES_CALLBACK_SECRET, etc.) are always picked up.
+python3 - <<'PYEOF'
+import os, re
+from pathlib import Path
+
+env_path = Path(os.environ["HERMES_HOME"]) / ".env"
+inject = [
+    "OPENROUTER_API_KEY",
+    "HERMES_CALLBACK_SECRET",
+    "HERMES_CALLBACK_URL",
+    "HERMES_MAX_ITERATIONS",
+]
+
+content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+for var in inject:
+    val = os.environ.get(var, "")
+    if not val:
+        continue
+    if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
+        content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+    else:
+        content += f"\n{var}={val}"
+env_path.write_text(content, encoding="utf-8")
+print(f"[entrypoint] Injected env vars into {env_path}")
+PYEOF
+
 # config.yaml
 if [ ! -f "$HERMES_HOME/config.yaml" ]; then
-    cp "$INSTALL_DIR/cli-config.yaml.example" "$HERMES_HOME/config.yaml"
+    if [ -f "$INSTALL_DIR/docker/config.yaml" ]; then
+        cp "$INSTALL_DIR/docker/config.yaml" "$HERMES_HOME/config.yaml"
+    else
+        cp "$INSTALL_DIR/cli-config.yaml.example" "$HERMES_HOME/config.yaml"
+    fi
 fi
 
 # SOUL.md
