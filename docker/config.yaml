@@ -3,6 +3,9 @@ model:
   provider: openrouter
   base_url: ''
 providers: {}
+fallback_model:
+  provider: openrouter
+  model: openai/gpt-oss-120b:free
 fallback_providers: []
 credential_pool_strategies: {}
 toolsets:
