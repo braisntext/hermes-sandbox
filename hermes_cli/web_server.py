@@ -119,6 +119,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
+    "/api/delegate",  # External orchestrator endpoint (BigLobster COO → Hermes)
 })
 
 
@@ -4357,8 +4358,12 @@ async def _delegate_background(task_id: str, prompt: str, webhook_url: str) -> N
 
     try:
         import httpx
+        callback_headers: dict = {}
+        callback_secret = os.environ.get("HERMES_CALLBACK_SECRET", "")
+        if callback_secret:
+            callback_headers["x-hermes-secret"] = callback_secret
         async with httpx.AsyncClient(timeout=30) as client:
-            await client.post(webhook_url, json=payload)
+            await client.post(webhook_url, json=payload, headers=callback_headers)
     except Exception:
         _log.exception(
             "Delegate webhook delivery failed for task_id=%s to %s", task_id, webhook_url
