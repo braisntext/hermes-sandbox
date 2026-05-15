@@ -116,3 +116,5 @@ ENV PATH="/opt/data/.local/bin:${PATH}"
 VOLUME [ "/opt/data" ]
 EXPOSE 9119
 ENTRYPOINT [ "/usr/bin/tini", "-g", "--", "/opt/hermes/docker/entrypoint.sh" ]
+# Keep the container alive so the dashboard sidecar (HERMES_DASHBOARD=1) can serve.
+CMD ["sleep", "infinity"]
