@@ -102,6 +102,20 @@ for var in inject:
         content += f"\n{var}={val}"
 env_path.write_text(content, encoding="utf-8")
 print(f"[entrypoint] Injected env vars into {env_path}")
+
+# Also update model in config.yaml if HERMES_DEFAULT_MODEL is set
+import yaml
+default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
+config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+if default_model and config_path.exists():
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+        if cfg.get("model", {}).get("default") != default_model:
+            cfg.setdefault("model", {})["default"] = default_model
+            config_path.write_text(yaml.dump(cfg, default_flow_style=False))
+            print(f"[entrypoint] Updated model.default to {default_model}")
+    except Exception as e:
+        print(f"[entrypoint] Warning: could not update config.yaml: {e}")
 PYEOF
 
 # config.yaml
