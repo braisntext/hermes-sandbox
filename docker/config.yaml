@@ -22,3 +22,108 @@ agent:
   disabled_toolsets: []
   verbose: false
   reasoning_effort: medium
+terminal:
+  backend: local
+  modal_mode: auto
+  cwd: .
+  timeout: 180
+  persistent_shell: true
+  lifetime_seconds: 300
+  auto_source_bashrc: true
+  docker_image: nikolaik/python-nodejs:python3.11-nodejs20
+  container_cpu: 1
+  container_memory: 5120
+  container_disk: 51200
+  container_persistent: true
+security:
+  allow_private_urls: false
+  redact_secrets: true
+  tirith_enabled: true
+  tirith_fail_open: true
+  allow_lazy_installs: true
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  nudge_interval: 10
+  flush_min_turns: 6
+delegation:
+  max_iterations: 50
+  child_timeout_seconds: 600
+  max_concurrent_children: 3
+  max_spawn_depth: 1
+  orchestrator_enabled: true
+  subagent_auto_approve: false
+  inherit_mcp_toolsets: true
+compression:
+  enabled: true
+  threshold: 0.5
+  target_ratio: 0.2
+  protect_last_n: 20
+  hygiene_hard_message_limit: 400
+  protect_first_n: 3
+context:
+  engine: compressor
+file_read_max_chars: 100000
+tool_output:
+  max_bytes: 50000
+  max_lines: 2000
+  max_line_length: 2000
+tool_loop_guardrails:
+  warnings_enabled: true
+  hard_stop_enabled: false
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+display:
+  compact: false
+  personality: concise
+  streaming: true
+  show_cost: false
+  show_reasoning: false
+  inline_diffs: true
+  file_mutation_verifier: true
+  tool_progress: all
+  language: en
+approvals:
+  mode: manual
+  timeout: 60
+  cron_mode: deny
+  mcp_reload_confirm: true
+  destructive_slash_confirm: true
+openrouter:
+  response_cache: true
+  response_cache_ttl: 300
+  min_coding_score: 0.65
+prompt_caching:
+  cache_ttl: 5m
+logging:
+  level: INFO
+  max_size_mb: 5
+  backup_count: 3
+sessions:
+  auto_prune: false
+  retention_days: 90
+  vacuum_after_prune: true
+  min_interval_hours: 24
+curator:
+  enabled: true
+  interval_hours: 168
+  min_idle_hours: 2
+  stale_after_days: 30
+  archive_after_days: 90
+kanban:
+  dispatch_in_gateway: true
+  dispatch_interval_seconds: 60
+  failure_limit: 2
+platform_toolsets:
+  cli:
+  - hermes-cli
+  telegram:
+  - hermes-telegram
