@@ -62,6 +62,14 @@ if [ "$(id -u)" = "0" ]; then
         chmod 640 "$HERMES_HOME/cron/jobs.json" 2>/dev/null || true
     fi
 
+    # Fix ownership of gateway.lock — if a previous container run left the lock
+    # owned by a different UID (host user, root, etc.), opening it with "a+"
+    # fails with PermissionError and the gateway cannot start.
+    if [ -f "$HERMES_HOME/gateway.lock" ]; then
+        chown hermes:hermes "$HERMES_HOME/gateway.lock" 2>/dev/null || true
+        chmod 640 "$HERMES_HOME/gateway.lock" 2>/dev/null || true
+    fi
+
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
 fi

@@ -28,28 +28,24 @@ services:
       - HERMES_DASHBOARD_HOST=0.0.0.0
       - HERMES_DASHBOARD_PORT=9119
     volumes:
+      # Isolated data volume — replaces ~/.hermes on a normal install.
+      # All config, logs, sessions, skills, and crons land here.
       - ./workspace_test:/opt/data
-      # --- PROYECTOS DELEGADOS AL ARCHITECT (Nuevos Volúmenes) ---
+      # --- Proyectos montados para que Hermes pueda leer/escribir ---
       - /Users/brais/VSCODE/FinView:/workspace/FinView
       - /Users/brais/VSCODE/WorldHawk:/workspace/WorldHawk
       - /Users/brais/VSCODE/grow-shop:/workspace/grow-shop
       - /Users/brais/VSCODE/bl-site-package:/workspace/bl-site-package
       - /Users/brais/VSCODE/biglobster:/workspace/biglobster
-
-      # Isolated data volume — replaces ~/.hermes on a normal install.
-      # All config, logs, sessions, skills, and crons land here.
-      - ./workspace_test:/opt/data
     ports:
-      # Dashboard UI
-      - "127.0.0.1:9119:9119"
-      # OpenAI-compatible API server (disabled by default; enable below)
-      # - "127.0.0.1:8080:8080"
+      # Dashboard + /api/delegate — bind to all interfaces so ngrok can tunnel it
+      - "9119:9119"
     networks:
       - hermes-net
-    # Run `gateway run` — starts the agent gateway (Telegram/Slack/etc.)
-    # For interactive CLI evaluation, swap this for: ["sleep", "infinity"]
-    # then exec in: docker exec -it hermes-sandbox hermes chat
-    command: ["gateway", "run"]
+    # sleep infinity keeps the container alive while the dashboard sidecar
+    # (HERMES_DASHBOARD=1) serves the FastAPI server on port 9119.
+    # No gateway needed — we only use the dashboard's /api/delegate endpoint.
+    command: ["sleep", "infinity"]
 
 networks:
   hermes-net:
