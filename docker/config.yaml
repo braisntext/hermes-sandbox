@@ -1,11 +1,11 @@
 model:
-  default: deepseek/deepseek-v3.2
+  default: openrouter/owl-alpha
   provider: openrouter
   base_url: ''
 providers: {}
 fallback_model:
   provider: openrouter
-  model: openai/gpt-oss-120b:free
+  model: deepseek/deepseek-v4-flash
 fallback_providers: []
 credential_pool_strategies: {}
 toolsets:
