@@ -54,6 +54,14 @@ if [ "$(id -u)" = "0" ]; then
         chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
     fi
 
+    # Fix ownership of cron/jobs.json — if a previous run or a root-level
+    # docker exec created it as root:root (mode 600), the hermes runtime user
+    # cannot read its own cron jobs after a redeploy. See issue #1.
+    if [ -f "$HERMES_HOME/cron/jobs.json" ]; then
+        chown hermes:hermes "$HERMES_HOME/cron/jobs.json" 2>/dev/null || true
+        chmod 640 "$HERMES_HOME/cron/jobs.json" 2>/dev/null || true
+    fi
+
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
 fi
