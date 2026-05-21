@@ -1,5 +1,5 @@
 model:
-  default: openrouter/owl-alpha
+  default: tencent/hy3-preview
   provider: openrouter
   base_url: ''
 providers: {}
