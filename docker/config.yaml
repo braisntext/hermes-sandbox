@@ -1,5 +1,5 @@
 model:
-  default: tencent/hy3-preview
+  default: deepseek/deepseek-v4-flash
   provider: openrouter
   base_url: ''
 providers: {}
