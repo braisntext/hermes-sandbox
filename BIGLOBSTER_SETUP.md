@@ -142,7 +142,10 @@ Reusable Hermes skills live in `/opt/data/skills/` on the persistent volume.
 ## Smoke test
 
 ```bash
-# Health check
+# Container health probe (always returns 200 if process is alive)
+curl https://blhermes.zeabur.app/health
+
+# Richer status (gateway state, active sessions, model)
 curl https://blhermes.zeabur.app/api/status
 
 # Manual delegate (from BigLobster or any service in same Zeabur project)
@@ -158,8 +161,44 @@ curl -X POST http://hermes-sandbox.zeabur.internal:9119/api/delegate \
 
 ---
 
+## Startup log verification
+
+After every Zeabur restart, confirm these lines appear in the logs before clicking Restart Gateway:
+
+```
+[entrypoint] model.default already set to deepseek/deepseek-v4-flash
+```
+
+After clicking Restart Gateway in the web panel, confirm:
+
+```
+[startup] Model: deepseek/deepseek-v4-flash | Provider: openrouter | API key present: True
+```
+
+If `API key present: False` or `Provider resolution FAILED` → check `OPENROUTER_API_KEY` in Zeabur Variables.
+
+---
+
 ## Logs
 
 Zeabur → hermes service → **Logs** tab.
 
 For agent execution detail: `https://blhermes.zeabur.app/logs`
+
+---
+
+## Incident log
+
+### 2026-05-23 — Crash loop after OpenRouter 403
+
+**Symptom:** Container entered crash loop. Zeabur killed each pod seconds after `Started container hermes-sandbox`. Started after an OpenRouter HTTP 403 "Key limit exceeded" event; quota was increased but bot never recovered.
+
+**Root causes found and fixed:**
+
+1. **`_is_accepted_host()` wrong check order** (`hermes_cli/web_server.py`): When bound to `0.0.0.0`, Zeabur health probes use HTTP/1.0 (no `Host` header). The function returned 403 because the empty-host guard fired before the `0.0.0.0` bypass. Fixed by moving the `0.0.0.0` check to the top. Added `/health` endpoint as a dedicated probe target.
+
+2. **Silent entrypoint failure for string-format `model` in config.yaml** (`docker/entrypoint.sh`): `cfg.setdefault("model", {})["default"] = value` raises `TypeError` when `cfg["model"]` is a plain string (as it is on the persistent volume from previous deploys). Error was swallowed by `except Exception`. Fixed by type-checking `model_val` and handling both string and dict formats explicitly.
+
+3. **Startup pre-flight logging added** (`gateway/run.py`): Non-fatal log block before `runner.start()` that prints model, provider, and API key presence — makes misconfiguration visible in Zeabur logs immediately on startup without waiting for a first message.
+
+**Resolution:** Rebuilt image, pushed to GHCR, restarted Zeabur service. Container stabilised on first boot.
