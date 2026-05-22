@@ -119,19 +119,38 @@ for var in inject:
 env_path.write_text(content, encoding="utf-8")
 print(f"[entrypoint] Injected env vars into {env_path}")
 
-# Also update model in config.yaml if HERMES_DEFAULT_MODEL is set
+# Also update model in config.yaml if HERMES_DEFAULT_MODEL is set.
+# Handles both string ("model: deepseek/deepseek-v4-flash") and dict
+# ("model: {default: ..., provider: ...}") formats in config.yaml.
 import yaml
 default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
 config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
 if default_model and config_path.exists():
     try:
         cfg = yaml.safe_load(config_path.read_text()) or {}
-        if cfg.get("model", {}).get("default") != default_model:
-            cfg.setdefault("model", {})["default"] = default_model
+        model_val = cfg.get("model")
+        current_default = None
+        if isinstance(model_val, dict):
+            current_default = model_val.get("default")
+        elif isinstance(model_val, str):
+            current_default = model_val.strip()
+        if current_default != default_model:
+            if isinstance(model_val, dict):
+                model_val["default"] = default_model
+                cfg["model"] = model_val
+            else:
+                # Upgrade string format to dict so provider/base_url can coexist
+                cfg["model"] = {"default": default_model, "provider": "openrouter", "base_url": ""}
             config_path.write_text(yaml.dump(cfg, default_flow_style=False))
-            print(f"[entrypoint] Updated model.default to {default_model}")
+            print(f"[entrypoint] Updated model.default to {default_model} (was: {current_default!r})")
+        else:
+            print(f"[entrypoint] model.default already set to {default_model}")
     except Exception as e:
         print(f"[entrypoint] Warning: could not update config.yaml: {e}")
+elif default_model:
+    print(f"[entrypoint] HERMES_DEFAULT_MODEL={default_model} set but config.yaml not found yet (will be created below)")
+else:
+    print("[entrypoint] HERMES_DEFAULT_MODEL not set — using existing config.yaml model")
 PYEOF
 
 # config.yaml

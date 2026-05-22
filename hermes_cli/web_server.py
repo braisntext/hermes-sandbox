@@ -120,6 +120,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
     "/api/delegate",  # External orchestrator endpoint (BigLobster COO → Hermes)
+    "/health",        # Container health probe (Zeabur, Fly.io, Railway, etc.)
 })
 
 
@@ -169,6 +170,11 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
+    # When bound to all interfaces, no Host-layer protection is possible —
+    # accept any request, including those without a Host header (HTTP/1.0
+    # health probes from cloud providers like Zeabur, Fly.io, Railway, etc.).
+    if bound_host in {"0.0.0.0", "::"}:
+        return True
     if not host_header:
         return False
     # Strip port suffix. IPv6 addresses use bracket notation:
@@ -188,12 +194,6 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     else:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
-
-    # 0.0.0.0 bind means operator explicitly opted into all-interfaces
-    # (requires --insecure per web_server.start_server). No Host-layer
-    # defence can protect that mode; rely on operator network controls.
-    if bound_host in {"0.0.0.0", "::"}:
-        return True
 
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
@@ -533,6 +533,16 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
         except Exception:
             continue
     return False, None
+
+
+@app.get("/health")
+async def health_check():
+    """Simple health probe for container orchestrators (Zeabur, Fly.io, Railway, etc.).
+
+    Always returns 200 as long as the process is alive.  The richer liveness
+    data (gateway state, active sessions, etc.) lives on /api/status.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/api/status")

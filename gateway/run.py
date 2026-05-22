@@ -16722,6 +16722,31 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
 
+    # Log resolved model/provider before starting so Zeabur/container logs
+    # immediately surface misconfiguration without waiting for a first message.
+    try:
+        _preflight_model = _resolve_gateway_model()
+        _preflight_provider = "unknown"
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            _rt = resolve_runtime_provider(requested=os.getenv("HERMES_INFERENCE_PROVIDER"))
+            _preflight_provider = _rt.get("provider", "unknown")
+            logger.info(
+                "[startup] Model: %s | Provider: %s | API key present: %s",
+                _preflight_model,
+                _preflight_provider,
+                bool(_rt.get("api_key")),
+            )
+        except Exception as _pf_exc:
+            logger.warning(
+                "[startup] Model: %s | Provider resolution FAILED: %s "
+                "(gateway will still start — error will surface on first message)",
+                _preflight_model,
+                _pf_exc,
+            )
+    except Exception as _pf_outer:
+        logger.debug("[startup] Pre-flight model/provider check failed: %s", _pf_outer)
+
     # Start the gateway
     success = await runner.start()
     if not success:
