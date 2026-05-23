@@ -10,6 +10,12 @@ fallback_providers: []
 credential_pool_strategies: {}
 toolsets:
 - hermes-cli
+web:
+  backend: exa
+image_gen:
+  provider: huggingface
+video_gen:
+  provider: huggingface
 agent:
   max_turns: 60
   gateway_timeout: 1800

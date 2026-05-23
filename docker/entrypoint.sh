@@ -106,6 +106,7 @@ inject = [
     "HERMES_CALLBACK_URL",
     "HERMES_MAX_ITERATIONS",
     "EXA_API_KEY",
+    "HUGGINGFACE_API_KEY",
 ]
 
 content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
