@@ -125,15 +125,19 @@ Check status: Gateway Status should show **RUNNING** in the bottom-left of the p
 
 ## Mounted workspaces
 
-The Hermes container has read/write access to these repos via Zeabur volumes:
+The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent volume, `HERMES_HOME=/opt/data`). The entrypoint pre-creates `/opt/data/workspace/` on boot.
 
-| Container path | Repo |
-|----------------|------|
-| `/workspace/FinView` | FinView |
-| `/workspace/WorldHawk` | WorldHawk |
-| `/workspace/grow-shop` | grow-shop |
-| `/workspace/bl-site-package` | bl-site-package |
-| `/workspace/biglobster` | biglobster |
+> ⚠️ `/workspace/` does **not** exist at the container root. All paths must be under `/opt/data/`.
+
+| Container path | Purpose |
+|----------------|---------|
+| `/opt/data/workspace/FinView` | FinView repo working directory |
+| `/opt/data/workspace/WorldHawk` | WorldHawk repo working directory |
+| `/opt/data/workspace/grow-shop` | Grow Shop repo working directory |
+| `/opt/data/workspace/bl-site-package` | bl-site-package repo working directory |
+| `/opt/data/workspace/biglobster` | BigLobster repo working directory |
+| `/opt/data/biglobster/` | BigLobster output files (images, reports, exports) |
+| `/opt/data/cache/images/` | Auto-saved images from `image_generate` tool |
 
 ---
 
@@ -194,7 +198,7 @@ curl -X POST http://hermes-sandbox.zeabur.internal:9119/api/delegate \
   -H "Content-Type: application/json" \
   -d '{
     "task_id": "test-001",
-    "prompt": "List files in /workspace/biglobster and return a summary.",
+    "prompt": "List files in /opt/data/workspace/biglobster and return a summary.",
     "webhook_url": "https://biglobster.top/api/hermes-callback"
   }'
 # Expected: {"task_id":"test-001","status":"accepted"}
