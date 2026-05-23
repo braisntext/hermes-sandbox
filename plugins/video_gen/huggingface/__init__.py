@@ -60,7 +60,9 @@ _MODELS: Dict[str, Dict[str, Any]] = {
 
 DEFAULT_MODEL = "damo-vilab/text-to-video-ms-1.7b"
 
-_HF_API_URL = "https://api-inference.huggingface.co/models/{model}"
+# HF deprecated api-inference.huggingface.co in favour of the inference router.
+# New endpoint: https://router.huggingface.co/hf-inference/models/{model}/v1
+_HF_API_URL = "https://router.huggingface.co/hf-inference/models/{model}/v1"
 
 
 # ---------------------------------------------------------------------------

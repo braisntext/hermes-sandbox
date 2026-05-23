@@ -57,7 +57,9 @@ _MODELS: Dict[str, Dict[str, Any]] = {
 DEFAULT_MODEL = "black-forest-labs/FLUX.1-schnell"
 
 # HF Inference API endpoint pattern
-_HF_API_URL = "https://api-inference.huggingface.co/models/{model}"
+# HF deprecated api-inference.huggingface.co in favour of the inference router.
+# New endpoint: https://router.huggingface.co/hf-inference/models/{model}/v1
+_HF_API_URL = "https://router.huggingface.co/hf-inference/models/{model}/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +204,7 @@ class HuggingFaceImageGenProvider(ImageGenProvider):
 
         try:
             logger.debug("image_gen/huggingface: POST %s", url)
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
         except Exception as exc:
             logger.warning("image_gen/huggingface: request failed: %s", exc)
             return error_response(
