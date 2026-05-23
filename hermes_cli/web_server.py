@@ -4386,6 +4386,7 @@ def _run_delegate_agent(task_id: str, prompt: str) -> dict:
     from run_agent import AIAgent
     from hermes_cli.config import load_config
     from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_state import SessionDB
 
     config = load_config()
     model_cfg = config.get("model")
@@ -4397,11 +4398,18 @@ def _run_delegate_agent(task_id: str, prompt: str) -> dict:
     elif isinstance(model_cfg, str) and model_cfg.strip():
         default_model = model_cfg.strip()
 
+    try:
+        session_db = SessionDB()
+    except Exception:
+        _log.warning("Delegate: SessionDB unavailable, session will not be persisted")
+        session_db = None
+
     kwargs: Dict[str, Any] = {
         "platform": "api",
         "quiet_mode": True,
         "session_id": task_id or str(uuid.uuid4()),
         "model": default_model,
+        "session_db": session_db,
     }
     try:
         runtime = resolve_runtime_provider(requested=config_provider)
