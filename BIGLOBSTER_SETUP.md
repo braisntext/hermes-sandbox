@@ -105,9 +105,15 @@ The CEO can talk directly to Hermes without going through BigLobster/COO:
 
 ## Gateway
 
-The Hermes gateway (HTTP server on port 9119) must be running for BigLobster delegation to work. It does NOT start automatically with the container — it is managed by the web dashboard.
+The Hermes gateway handles Telegram messages and BigLobster delegation. It starts **automatically** on every container boot — no manual step needed.
 
-**To start/restart the gateway:**
+**Boot sequence:**
+1. Container starts → dashboard launches on port 9119 (background)
+2. Entrypoint polls `/health` (1s intervals, 30s max)
+3. Once dashboard responds → `hermes gateway restart` runs automatically
+4. Logs: `[entrypoint] Dashboard ready (Xs). Auto-starting gateway...` → `[entrypoint] Gateway auto-start complete.`
+
+**To manually restart the gateway** (e.g. after changing Telegram env vars):
 1. Go to `https://blhermes.zeabur.app`
 2. Click **Restart Gateway** in the System section (bottom left)
 
