@@ -14,6 +14,8 @@ web:
   backend: exa
 image_gen:
   provider: openrouter
+  openrouter:
+    model: x-ai/grok-imagine-image-quality
 video_gen:
   provider: huggingface
 agent:

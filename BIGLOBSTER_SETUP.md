@@ -272,6 +272,18 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 
 7. **`_ASPECT_TO_SIZE` / `response_format` fix** (`plugins/image_gen/openrouter/`): FLUX models on OpenRouter don't accept `response_format` or non-standard sizes. Payload simplified to `{model, prompt, n, size: "1024x1024"}`. Response parser now prefers `url` field (OpenRouter default) over `b64_json`.
 
+### 2026-05-23 — OpenRouter plugin: switch to chat completions + grok-imagine
+
+**Root cause**: `/api/v1/images/generations` endpoint broken/404 on OpenRouter.
+
+**Changes applied in container then synced to repo:**
+1. **Endpoint**: `/api/v1/images/generations` → `/api/v1/chat/completions`
+2. **Payload**: `{model, prompt, n, size}` → `{model, modalities: ["image"], messages: [{role: user, content: prompt}]}`
+3. **Default model**: `black-forest-labs/flux.2-klein-4b` → `x-ai/grok-imagine-image-quality`
+4. **Response parsing**: `data[0].url` → `choices[0].message.images[0].image_url.url` (base64 data URL — strip `data:image/png;base64,` prefix, save to cache)
+5. **docker/config.yaml**: added `image_gen.openrouter.model: x-ai/grok-imagine-image-quality`
+6. **FLUX models** kept in catalog as selectable fallbacks
+
 ### 2026-05-23 — Image gen plugin audit & test coverage
 
 1. **Dead code removed** (`plugins/image_gen/openrouter/`): `_ASPECT_TO_SIZE` dict was defined but never used (size is hardcoded `1024x1024` per FLUX OpenRouter limitation). Removed to keep the plugin clean.

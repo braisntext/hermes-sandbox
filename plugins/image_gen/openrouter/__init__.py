@@ -1,12 +1,13 @@
 """OpenRouter image generation backend.
 
-Uses OpenRouter's image generation API — same OPENROUTER_API_KEY already
-used by the Hermes gateway for LLM calls, so no extra credentials needed.
+Uses OpenRouter's chat completions API with ``modalities: ["image"]`` —
+same OPENROUTER_API_KEY already used by the Hermes gateway for LLM calls,
+so no extra credentials needed.
 
-Endpoint: ``https://openrouter.ai/api/v1/images/generations``
-Default model: ``black-forest-labs/FLUX-schnell``
-  - Fast (~5-10s), high quality, pay-per-use via OpenRouter credits
-  - Compatible with OpenAI images.generate() wire format
+Endpoint: ``https://openrouter.ai/api/v1/chat/completions``
+Default model: ``x-ai/grok-imagine-image-quality``
+  - High-quality image generation via xAI Grok through OpenRouter
+  - Response: base64 data URL in choices[0].message.images[0].image_url.url
 
 Auth: ``OPENROUTER_API_KEY`` env var (already configured in Zeabur).
 If the key is absent, ``is_available()`` returns False — no crash.
@@ -20,6 +21,7 @@ Model selection precedence:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,10 +42,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODELS: Dict[str, Dict[str, Any]] = {
+    "x-ai/grok-imagine-image-quality": {
+        "display": "Grok Imagine (Quality)",
+        "speed": "~5-15s",
+        "strengths": "High-quality generation via xAI Grok on OpenRouter",
+        "price": "~$0.07 per image",
+    },
     "black-forest-labs/flux.2-klein-4b": {
         "display": "FLUX.2 Klein 4B",
         "speed": "~5-10s",
-        "strengths": "Cheap paid model, reliable on OpenRouter, good quality",
+        "strengths": "Cheap, reliable on OpenRouter, good quality",
         "price": "~$0.014 per image",
     },
     "black-forest-labs/FLUX-schnell": {
@@ -60,9 +68,10 @@ _MODELS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-DEFAULT_MODEL = "black-forest-labs/flux.2-klein-4b"
+DEFAULT_MODEL = "x-ai/grok-imagine-image-quality"
 
-_OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/images/generations"
+_OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -100,13 +109,20 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
+def _extract_b64_from_data_url(data_url: str) -> Optional[str]:
+    """Strip the ``data:image/...;base64,`` prefix and return the raw b64 string."""
+    if "," in data_url:
+        return data_url.split(",", 1)[1]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
 
 
 class OpenRouterImageGenProvider(ImageGenProvider):
-    """OpenRouter image generation backend (FLUX via openrouter.ai)."""
+    """OpenRouter image generation via chat completions + modalities: [image]."""
 
     @property
     def name(self) -> str:
@@ -146,7 +162,7 @@ class OpenRouterImageGenProvider(ImageGenProvider):
         return {
             "name": "OpenRouter",
             "badge": "paid",
-            "tag": "FLUX-schnell via openrouter.ai — uses existing OPENROUTER_API_KEY",
+            "tag": "Grok Imagine (quality) via openrouter.ai — uses existing OPENROUTER_API_KEY",
             "env_vars": [
                 {
                     "key": "OPENROUTER_API_KEY",
@@ -175,10 +191,7 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            logger.warning(
-                "image_gen/openrouter: OPENROUTER_API_KEY not set — "
-                "cannot generate image."
-            )
+            logger.warning("image_gen/openrouter: OPENROUTER_API_KEY not set")
             return error_response(
                 error="OPENROUTER_API_KEY not set.",
                 error_type="auth_required",
@@ -197,9 +210,6 @@ class OpenRouterImageGenProvider(ImageGenProvider):
             )
 
         model_id, _meta = _resolve_model()
-        # FLUX models on OpenRouter only accept standard square sizes.
-        # response_format is not supported — OpenRouter returns URLs by default.
-        size = "1024x1024"
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -207,18 +217,17 @@ class OpenRouterImageGenProvider(ImageGenProvider):
         }
         payload: Dict[str, Any] = {
             "model": model_id,
-            "prompt": prompt,
-            "n": 1,
-            "size": size,
+            "modalities": ["image"],
+            "messages": [{"role": "user", "content": prompt}],
         }
 
         try:
-            logger.debug("image_gen/openrouter: POST %s model=%s", _OPENROUTER_IMAGE_URL, model_id)
+            logger.debug("image_gen/openrouter: POST %s model=%s", _OPENROUTER_CHAT_URL, model_id)
             response = requests.post(
-                _OPENROUTER_IMAGE_URL,
+                _OPENROUTER_CHAT_URL,
                 headers=headers,
                 json=payload,
-                timeout=30,
+                timeout=60,
             )
         except Exception as exc:
             logger.warning("image_gen/openrouter: request failed: %s", exc)
@@ -233,9 +242,7 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
         if response.status_code != 200:
             body = response.text[:500]
-            logger.warning(
-                "image_gen/openrouter: HTTP %d — %s", response.status_code, body
-            )
+            logger.warning("image_gen/openrouter: HTTP %d — %s", response.status_code, body)
             return error_response(
                 error=f"OpenRouter API error {response.status_code}: {body}",
                 error_type="api_error",
@@ -247,11 +254,9 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
         try:
             data = response.json()
-            item = data["data"][0]
-            # OpenRouter returns URL by default; b64_json only if explicitly requested.
-            image_ref = item.get("url") or item.get("b64_json")
-            if not image_ref:
-                raise ValueError("no url or b64_json in response item")
+            image_url = data["choices"][0]["message"]["images"][0]["image_url"]["url"]
+            if not image_url:
+                raise ValueError("empty image_url")
         except Exception as exc:
             logger.warning(
                 "image_gen/openrouter: could not parse response: %s — body: %s",
@@ -266,37 +271,45 @@ class OpenRouterImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        # If it's a URL, return directly. If it's b64, save to cache.
-        if image_ref.startswith("http"):
+        # Response is a base64 data URL: "data:image/png;base64,<data>"
+        if image_url.startswith("data:"):
+            b64 = _extract_b64_from_data_url(image_url)
+            if not b64:
+                return error_response(
+                    error="Could not extract base64 data from image data URL",
+                    error_type="parse_error",
+                    provider="openrouter",
+                    model=model_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+            try:
+                saved_path = save_b64_image(b64, prefix=f"or_{model_id.split('/')[-1]}")
+            except Exception as exc:
+                logger.warning("image_gen/openrouter: could not save image: %s", exc)
+                return error_response(
+                    error=f"Could not save image to cache: {exc}",
+                    error_type="io_error",
+                    provider="openrouter",
+                    model=model_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
             return success_response(
-                image=image_ref,
+                image=str(saved_path),
                 model=model_id,
                 prompt=prompt,
                 aspect_ratio=aspect,
                 provider="openrouter",
-                extra={"size": size},
             )
 
-        try:
-            saved_path = save_b64_image(image_ref, prefix=f"or_{model_id.split('/')[-1]}")
-        except Exception as exc:
-            logger.warning("image_gen/openrouter: could not save image: %s", exc)
-            return error_response(
-                error=f"Could not save image to cache: {exc}",
-                error_type="io_error",
-                provider="openrouter",
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect,
-            )
-
+        # Plain URL fallback (future-proof)
         return success_response(
-            image=str(saved_path),
+            image=image_url,
             model=model_id,
             prompt=prompt,
             aspect_ratio=aspect,
             provider="openrouter",
-            extra={"size": size},
         )
 
 
