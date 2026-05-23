@@ -40,10 +40,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODELS: Dict[str, Dict[str, Any]] = {
+    "black-forest-labs/flux.2-klein-4b": {
+        "display": "FLUX.2 Klein 4B",
+        "speed": "~5-10s",
+        "strengths": "Cheap paid model, reliable on OpenRouter, good quality",
+        "price": "~$0.014 per image",
+    },
     "black-forest-labs/FLUX-schnell": {
         "display": "FLUX.1-schnell",
         "speed": "~5-10s",
-        "strengths": "Fast, high quality, pay-per-use via OpenRouter credits",
+        "strengths": "Free tier fallback",
         "price": "~$0.001-0.003 per image",
     },
     "black-forest-labs/FLUX-1.1-pro": {
@@ -54,7 +60,7 @@ _MODELS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-DEFAULT_MODEL = "black-forest-labs/FLUX-schnell"
+DEFAULT_MODEL = "black-forest-labs/flux.2-klein-4b"
 
 _OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/images/generations"
 
