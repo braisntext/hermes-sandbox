@@ -153,6 +153,39 @@ elif default_model:
     print(f"[entrypoint] HERMES_DEFAULT_MODEL={default_model} set but config.yaml not found yet (will be created below)")
 else:
     print("[entrypoint] HERMES_DEFAULT_MODEL not set — using existing config.yaml model")
+
+# Force tool provider settings into the persistent config.yaml on every boot.
+# docker/config.yaml is the source of truth, but the persistent volume
+# config.yaml is only copied from it on FIRST boot — subsequent reboots keep
+# whatever is already on the volume.  We patch the three keys here so they
+# always match the intended values regardless of how old the volume config is.
+#
+# Keys patched:
+#   web.backend        = "exa"          (requires EXA_API_KEY)
+#   image_gen.provider = "huggingface"  (requires HUGGINGFACE_API_KEY)
+#   video_gen.provider = "huggingface"  (requires HUGGINGFACE_API_KEY)
+_tool_overrides = {
+    ("web", "backend"): "exa",
+    ("image_gen", "provider"): "huggingface",
+    ("video_gen", "provider"): "huggingface",
+}
+if config_path.exists():
+    try:
+        _cfg = yaml.safe_load(config_path.read_text()) or {}
+        _changed = False
+        for (_section, _key), _val in _tool_overrides.items():
+            if not isinstance(_cfg.get(_section), dict):
+                _cfg[_section] = {}
+            if _cfg[_section].get(_key) != _val:
+                _cfg[_section][_key] = _val
+                _changed = True
+                print(f"[entrypoint] Set {_section}.{_key}={_val} in config.yaml")
+            else:
+                print(f"[entrypoint] {_section}.{_key} already set to {_val!r}")
+        if _changed:
+            config_path.write_text(yaml.dump(_cfg, default_flow_style=False))
+    except Exception as _e:
+        print(f"[entrypoint] Warning: could not update tool providers in config.yaml: {_e}")
 PYEOF
 
 # config.yaml
