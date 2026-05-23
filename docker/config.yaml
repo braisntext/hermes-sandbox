@@ -13,7 +13,7 @@ toolsets:
 web:
   backend: exa
 image_gen:
-  provider: huggingface
+  provider: openrouter
 video_gen:
   provider: huggingface
 agent:

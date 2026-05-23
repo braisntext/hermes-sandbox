@@ -166,7 +166,7 @@ else:
 #   video_gen.provider = "huggingface"  (requires HUGGINGFACE_API_KEY)
 _tool_overrides = {
     ("web", "backend"): "exa",
-    ("image_gen", "provider"): "huggingface",
+    ("image_gen", "provider"): "openrouter",
     ("video_gen", "provider"): "huggingface",
 }
 if config_path.exists():
@@ -187,6 +187,12 @@ if config_path.exists():
     except Exception as _e:
         print(f"[entrypoint] Warning: could not update tool providers in config.yaml: {_e}")
 PYEOF
+
+# --- Egress connectivity diagnostics ---
+# Logs reachability of key external domains so Zeabur egress blocks are
+# visible in container logs without needing a separate debug deploy.
+echo "[entrypoint] Egress check: openrouter.ai $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo 'FAIL')"
+echo "[entrypoint] Egress check: router.huggingface.co $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://router.huggingface.co/ 2>/dev/null || echo 'FAIL')"
 
 # config.yaml
 if [ ! -f "$HERMES_HOME/config.yaml" ]; then
