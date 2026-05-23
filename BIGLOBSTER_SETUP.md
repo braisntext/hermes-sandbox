@@ -43,7 +43,7 @@ Zeabur's build timeout is too short for the 2.7GB image (Playwright + Chromium +
    cd /Users/brais/VSCODE/hermes-sandbox
    docker buildx build --platform linux/amd64 -t ghcr.io/braisntext/hermes-sandbox:latest --push .
    ```
-   ⚠️ Takes ~45 min on Apple Silicon (arm64). Run in background.
+   First build: ~45 min on Apple Silicon. **Subsequent builds with cache: ~2-3 min** (only changed layers rebuild).
 3. Restart Hermes service in Zeabur dashboard
 
 ### Future flow (once GitHub Actions is enabled by GitHub support)
@@ -70,6 +70,8 @@ For model changes or env var updates, use Zeabur Variables instead:
 | `HERMES_DASHBOARD` | Yes | Set to `1` to start the web dashboard on port 9119 |
 | `TELEGRAM_BOT_TOKEN` | No | Token for direct CEO ↔ Hermes Telegram chat (@b_l_hermes_bot) |
 | `TELEGRAM_ALLOWED_USERS` | No | CEO's Telegram user ID for direct access |
+| `EXA_API_KEY` | No | Exa web search API key — activates the `web` toolset |
+| `HUGGINGFACE_API_KEY` | No | HuggingFace token — activates `video_gen` (text-to-video) |
 
 ## Zeabur environment variables (BigLobster service)
 
@@ -135,6 +137,20 @@ The Hermes container has read/write access to these repos via Zeabur volumes:
 
 ---
 
+## Available tools
+
+Hermes activates tools based on configured API keys. The entrypoint forces provider settings into `config.yaml` on every boot.
+
+| Toolset | Provider | Key required | Notes |
+|---------|----------|-------------|-------|
+| `web` | Exa | `EXA_API_KEY` | Web search + content extraction |
+| `image_gen` | OpenRouter | `OPENROUTER_API_KEY` | FLUX.2-klein-4b via `openrouter.ai/api/v1/images/generations` |
+| `video_gen` | HuggingFace | `HUGGINGFACE_API_KEY` | Text-to-video via `router.huggingface.co` (damo-vilab/text-to-video-ms-1.7b) |
+
+Plugins live in `plugins/image_gen/` and `plugins/video_gen/` — **baked into the Docker image**, not synced at boot. Changes require a rebuild.
+
+---
+
 ## Skills
 
 Reusable Hermes skills live in `/opt/data/skills/` on the persistent volume.
@@ -169,16 +185,22 @@ curl -X POST http://hermes-sandbox.zeabur.internal:9119/api/delegate \
 
 ## Startup log verification
 
-After every Zeabur restart, confirm these lines appear in the logs before clicking Restart Gateway:
+After every Zeabur restart, confirm these lines appear in the logs:
 
 ```
 [entrypoint] model.default already set to deepseek/deepseek-v4-flash
-```
-
-After clicking Restart Gateway in the web panel, confirm:
-
-```
+[entrypoint] web.backend already set to 'exa'
+[entrypoint] image_gen.provider already set to 'openrouter'
+[entrypoint] video_gen.provider already set to 'huggingface'
+[entrypoint] Dashboard ready (Xs). Auto-starting gateway...
+[entrypoint] Gateway auto-start complete.
 [startup] Model: deepseek/deepseek-v4-flash | Provider: openrouter | API key present: True
+```
+
+Also check egress:
+```
+[entrypoint] Egress check: openrouter.ai 200
+[entrypoint] Egress check: router.huggingface.co 200   (or FAIL if Zeabur blocks it)
 ```
 
 If `API key present: False` or `Provider resolution FAILED` → check `OPENROUTER_API_KEY` in Zeabur Variables.
@@ -208,3 +230,21 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 3. **Startup pre-flight logging added** (`gateway/run.py`): Non-fatal log block before `runner.start()` that prints model, provider, and API key presence — makes misconfiguration visible in Zeabur logs immediately on startup without waiting for a first message.
 
 **Resolution:** Rebuilt image, pushed to GHCR, restarted Zeabur service. Container stabilised on first boot.
+
+### 2026-05-23 — Tools activation (web, image_gen, video_gen)
+
+**Changes shipped:**
+
+1. **Gateway auto-start** (`docker/entrypoint.sh`): After launching the dashboard in background, entrypoint polls `/health` (1s intervals, 30s timeout) then calls `hermes gateway restart` automatically. No manual "Restart Gateway" click needed after container restarts.
+
+2. **Web tool (Exa)**: `EXA_API_KEY` added to entrypoint inject list. `web.backend=exa` forced into persistent `config.yaml` on every boot.
+
+3. **image_gen (OpenRouter)**: New plugin `plugins/image_gen/openrouter/` using `OPENROUTER_API_KEY` (already present) + `openrouter.ai/api/v1/images/generations`. Default model: `black-forest-labs/flux.2-klein-4b` (~$0.014/image). HuggingFace plugin was attempted first but Zeabur blocks `router.huggingface.co` egress.
+
+4. **video_gen (HuggingFace)**: New plugin `plugins/video_gen/huggingface/` using `damo-vilab/text-to-video-ms-1.7b` via `router.huggingface.co`. Note: stable-video-diffusion (SVD) is image-to-video only and not on HF free Serverless tier.
+
+5. **Persistent config override** (`docker/entrypoint.sh`): `docker/config.yaml` is only seeded to the persistent volume on first boot. Added a boot-time patch that forces `web.backend`, `image_gen.provider`, and `video_gen.provider` into the volume's `config.yaml` on every restart.
+
+6. **Egress diagnostics**: Entrypoint now logs HTTP status for `openrouter.ai` and `router.huggingface.co` on every boot, making Zeabur egress blocks immediately visible in container logs.
+
+7. **`_ASPECT_TO_SIZE` / `response_format` fix** (`plugins/image_gen/openrouter/`): FLUX models on OpenRouter don't accept `response_format` or non-standard sizes. Payload simplified to `{model, prompt, n, size: "1024x1024"}`. Response parser now prefers `url` field (OpenRouter default) over `b64_json`.
