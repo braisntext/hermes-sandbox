@@ -78,7 +78,8 @@ class TestAvailability:
 
     def test_api_key_set_available(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "test")
-        assert openai_plugin.OpenAIImageGenProvider().is_available() is True
+        with patch.dict("sys.modules", {"openai": MagicMock()}):
+            assert openai_plugin.OpenAIImageGenProvider().is_available() is True
 
 
 # ── Model resolution ────────────────────────────────────────────────────────

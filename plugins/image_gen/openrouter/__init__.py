@@ -64,15 +64,6 @@ DEFAULT_MODEL = "black-forest-labs/flux.2-klein-4b"
 
 _OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/images/generations"
 
-# Aspect ratio → approximate pixel dimensions for the API request.
-# OpenRouter/FLUX accept a "size" string (WxH).
-_ASPECT_TO_SIZE: Dict[str, str] = {
-    "landscape": "1344x768",
-    "square": "1024x1024",
-    "portrait": "768x1344",
-}
-
-
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------

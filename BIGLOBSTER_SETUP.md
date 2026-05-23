@@ -271,3 +271,15 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 6. **Egress diagnostics**: Entrypoint now logs HTTP status for `openrouter.ai` and `router.huggingface.co` on every boot, making Zeabur egress blocks immediately visible in container logs.
 
 7. **`_ASPECT_TO_SIZE` / `response_format` fix** (`plugins/image_gen/openrouter/`): FLUX models on OpenRouter don't accept `response_format` or non-standard sizes. Payload simplified to `{model, prompt, n, size: "1024x1024"}`. Response parser now prefers `url` field (OpenRouter default) over `b64_json`.
+
+### 2026-05-23 — Image gen plugin audit & test coverage
+
+1. **Dead code removed** (`plugins/image_gen/openrouter/`): `_ASPECT_TO_SIZE` dict was defined but never used (size is hardcoded `1024x1024` per FLUX OpenRouter limitation). Removed to keep the plugin clean.
+
+2. **`plugin.yaml` corrected** (`plugins/image_gen/openrouter/`): Description still said "FLUX-schnell" but the active default model is `flux.2-klein-4b`. Updated.
+
+3. **New test suites added**:
+   - `tests/plugins/image_gen/test_openrouter_provider.py` — 17 tests covering metadata, availability, model resolution, generate (URL path, b64 path, API errors, network error, parse error, payload shape, aspect ratios), and registration.
+   - `tests/plugins/image_gen/test_huggingface_provider.py` — 16 tests covering metadata, availability, model resolution, generate (successful save, 503 cold-start, API errors, network error, URL pattern, auth header, aspect ratios), and registration.
+
+4. **Existing test fixes** (`tests/plugins/image_gen/test_openai_provider.py`, `test_openai_codex_provider.py`): 9 tests were failing due to missing `openai` package in the dev environment. Fixed by injecting a `MagicMock` into `sys.modules["openai"]` via pytest fixtures — tests now pass without requiring the optional `openai` package installed.

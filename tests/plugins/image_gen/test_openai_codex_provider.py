@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -55,6 +56,13 @@ class _FakeStream:
 def _tmp_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     yield tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _stub_openai():
+    """Stub the openai package so tests run without it installed."""
+    with patch.dict("sys.modules", {"openai": MagicMock()}):
+        yield
 
 
 @pytest.fixture
