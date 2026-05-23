@@ -161,6 +161,25 @@ Reusable Hermes skills live in `/opt/data/skills/` on the persistent volume.
 
 ---
 
+## Session persistence for delegated tasks
+
+Tasks arriving via `/api/delegate` (from BigLobster COO) are now persisted to `state.db` so they are queryable in future Hermes sessions via `session_search`.
+
+**How it works:**
+- `_run_delegate_agent` (`hermes_cli/web_server.py`) instantiates `SessionDB()` and passes it to `AIAgent` as `session_db`
+- Session is created in `state.db` with `session_id = task_id` (e.g. `hermes-1779505977261`) and `source = "api"`
+- All messages (prompt, tool calls, results) are flushed to `state.db` on task completion
+- The session is searchable via `session_search("hermes-1779505977261")` or by topic keywords in any future Hermes session
+
+**Note:** This requires a Docker image rebuild to reach production. Sessions created before the fix (commit `ef1b6922`) are not in `state.db` and cannot be recalled.
+
+**On the BigLobster side:** Each delegated task is also recorded in BigLobster's `agent_tasks` SQLite table (`request_id = task_id`), updated to `completed`/`failed` when the callback arrives. Query:
+```sql
+SELECT * FROM agent_tasks WHERE request_id = 'hermes-1779505977261';
+```
+
+---
+
 ## Smoke test
 
 ```bash
