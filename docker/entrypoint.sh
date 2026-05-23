@@ -218,6 +218,37 @@ case "${HERMES_DASHBOARD:-}" in
             stdbuf -oL -eL hermes dashboard "${dash_args[@]}" 2>&1 \
                 | sed -u 's/^/[dashboard] /'
         ) &
+
+        # Auto-start the gateway once the dashboard is responsive.
+        # Polls /health at 1s intervals (max 30s), then runs `hermes gateway
+        # restart`.  The whole block runs in a background subshell so the
+        # final `exec sleep infinity` proceeds immediately and the container
+        # never stalls waiting for the dashboard to warm up.
+        #
+        # `hermes gateway restart` is idempotent: with no service manager
+        # (Docker / Zeabur) it stops any existing gateway process and starts a
+        # fresh one.  On first boot nothing is running, so it's a clean start.
+        (
+            _gw_port="${HERMES_DASHBOARD_PORT:-9119}"
+            echo "[entrypoint] Waiting for dashboard on port ${_gw_port}..."
+            _gw_waited=0
+            _gw_ready=false
+            while [ "$_gw_waited" -lt 30 ]; do
+                if curl -sf "http://localhost:${_gw_port}/health" >/dev/null 2>&1; then
+                    _gw_ready=true
+                    break
+                fi
+                sleep 1
+                _gw_waited=$((_gw_waited + 1))
+            done
+            if [ "$_gw_ready" = true ]; then
+                echo "[entrypoint] Dashboard ready (${_gw_waited}s). Auto-starting gateway..."
+                hermes gateway restart 2>&1 | sed -u 's/^/[gateway-autostart] /'
+                echo "[entrypoint] Gateway auto-start complete."
+            else
+                echo "[entrypoint] Warning: dashboard did not respond after 30s — gateway NOT auto-started. Container will remain alive; start manually via the web panel."
+            fi
+        ) &
         ;;
 esac
 
