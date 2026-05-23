@@ -206,7 +206,9 @@ class OpenRouterImageGenProvider(ImageGenProvider):
             )
 
         model_id, _meta = _resolve_model()
-        size = _ASPECT_TO_SIZE.get(aspect, _ASPECT_TO_SIZE["square"])
+        # FLUX models on OpenRouter only accept standard square sizes.
+        # response_format is not supported — OpenRouter returns URLs by default.
+        size = "1024x1024"
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -217,7 +219,6 @@ class OpenRouterImageGenProvider(ImageGenProvider):
             "prompt": prompt,
             "n": 1,
             "size": size,
-            "response_format": "b64_json",
         }
 
         try:
@@ -255,22 +256,16 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
         try:
             data = response.json()
-            b64 = data["data"][0]["b64_json"]
+            item = data["data"][0]
+            # OpenRouter returns URL by default; b64_json only if explicitly requested.
+            image_ref = item.get("url") or item.get("b64_json")
+            if not image_ref:
+                raise ValueError("no url or b64_json in response item")
         except Exception as exc:
-            # Fallback: try URL format
-            try:
-                url = data["data"][0]["url"]
-                return success_response(
-                    image=url,
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                    provider="openrouter",
-                    extra={"size": size},
-                )
-            except Exception:
-                pass
-            logger.warning("image_gen/openrouter: could not parse response: %s", exc)
+            logger.warning(
+                "image_gen/openrouter: could not parse response: %s — body: %s",
+                exc, response.text[:300],
+            )
             return error_response(
                 error=f"Could not parse OpenRouter response: {exc}",
                 error_type="parse_error",
@@ -280,8 +275,19 @@ class OpenRouterImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # If it's a URL, return directly. If it's b64, save to cache.
+        if image_ref.startswith("http"):
+            return success_response(
+                image=image_ref,
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+                provider="openrouter",
+                extra={"size": size},
+            )
+
         try:
-            saved_path = save_b64_image(b64, prefix=f"or_{model_id.split('/')[-1]}")
+            saved_path = save_b64_image(image_ref, prefix=f"or_{model_id.split('/')[-1]}")
         except Exception as exc:
             logger.warning("image_gen/openrouter: could not save image: %s", exc)
             return error_response(
