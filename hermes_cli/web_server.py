@@ -4380,6 +4380,19 @@ async def _delegate_background(task_id: str, prompt: str, webhook_url: str) -> N
         )
 
 
+_DELEGATE_SYSTEM_PROMPT = (
+    "You are executing a delegated task from an external orchestrator (BigLobster). "
+    "Complete it fully and autonomously — no clarifying questions.\n\n"
+    "TOOL USE: Always use your tools — never produce a code artifact as a substitute.\n"
+    "- Image generation → call `image_generate`. Do NOT write HTML/CSS/JS to simulate an image.\n"
+    "- The generated image path is returned in the tool result. Reference it in your response.\n\n"
+    "FILE OUTPUT: The only writable volume is /opt/data/. Write output files there.\n"
+    "- Use /opt/data/biglobster/ for BigLobster-related output.\n"
+    "- Create subdirectories as needed with shell commands or write_file.\n"
+    "- Do NOT write to /workspace/, /tmp/, or any path outside /opt/data/."
+)
+
+
 def _run_delegate_agent(task_id: str, prompt: str) -> dict:
     """Synchronous agent runner — called inside a thread-pool executor."""
     import uuid
@@ -4410,6 +4423,7 @@ def _run_delegate_agent(task_id: str, prompt: str) -> dict:
         "session_id": task_id or str(uuid.uuid4()),
         "model": default_model,
         "session_db": session_db,
+        "ephemeral_system_prompt": _DELEGATE_SYSTEM_PROMPT,
     }
     try:
         runtime = resolve_runtime_provider(requested=config_provider)
