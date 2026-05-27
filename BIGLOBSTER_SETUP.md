@@ -30,25 +30,21 @@ BigLobster sentinel.js
 
 ## Deploy Process
 
-⚠️ Hermes does NOT autodeploy from git push. Zeabur is configured to pull a pre-built Docker image from GHCR.
+⚠️ Hermes does NOT autodeploy from git push. Cloud Build builds the image and pushes to GHCR; Zeabur then requires a manual restart to pull it.
 
 ### Why
-Zeabur's build timeout is too short for the 2.7GB image (Playwright + Chromium + Python + Node). The build was consistently failing mid-run.
+Zeabur's build timeout is too short for the 2.7GB image (Playwright + Chromium + Python + Node). GitHub Actions is not enabled on this repo. Cloud Build runs on GCP with no timeout issues.
 
-### Current flow (manual, until GitHub Actions is enabled)
+### Current flow
 
-1. Make changes to `hermes-sandbox` repo
-2. Build and push image from local Mac:
+1. Merge changes to `main`
+2. Trigger Cloud Build from the repo root:
    ```bash
    cd /Users/brais/VSCODE/hermes-sandbox
-   docker buildx build --platform linux/amd64 -t ghcr.io/braisntext/hermes-sandbox:latest --push .
+   gcloud builds submit --config=cloudbuild.yaml --substitutions=_GITHUB_TOKEN="<ghcr_pat>"
    ```
-   First build: ~45 min on Apple Silicon. **Subsequent builds with cache: ~2-3 min** (only changed layers rebuild).
+   Cloud Build builds the image and pushes it to `ghcr.io/braisntext/hermes-sandbox:latest`.
 3. Restart Hermes service in Zeabur dashboard
-
-### Future flow (once GitHub Actions is enabled by GitHub support)
-
-GitHub Actions workflow `.github/workflows/ghcr-publish.yml` builds and pushes to GHCR automatically on every push to `main`. Zeabur still requires manual restart to pull the new image.
 
 ### Config-only changes (no rebuild needed)
 
