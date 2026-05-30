@@ -107,6 +107,8 @@ inject = [
     "HERMES_MAX_ITERATIONS",
     "EXA_API_KEY",
     "HUGGINGFACE_API_KEY",
+    "GITHUB_TOKEN",
+    "AUXILIARY_VISION_MODEL",
 ]
 
 content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
@@ -161,13 +163,17 @@ else:
 # always match the intended values regardless of how old the volume config is.
 #
 # Keys patched:
-#   web.backend        = "exa"          (requires EXA_API_KEY)
-#   image_gen.provider = "huggingface"  (requires HUGGINGFACE_API_KEY)
-#   video_gen.provider = "huggingface"  (requires HUGGINGFACE_API_KEY)
+#   web.backend              = "exa"          (requires EXA_API_KEY)
+#   image_gen.provider       = "huggingface"  (requires HUGGINGFACE_API_KEY)
+#   video_gen.provider       = "huggingface"  (requires HUGGINGFACE_API_KEY)
+#   memory.memory_char_limit = 6000           (enough for multi-repo workflows)
+#   memory.user_char_limit   = 3000           (proportional to memory_char_limit)
 _tool_overrides = {
     ("web", "backend"): "exa",
     ("image_gen", "provider"): "openrouter",
     ("video_gen", "provider"): "huggingface",
+    ("memory", "memory_char_limit"): 6000,
+    ("memory", "user_char_limit"): 3000,
 }
 if config_path.exists():
     try:
@@ -206,6 +212,15 @@ fi
 # SOUL.md
 if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
     cp "$INSTALL_DIR/docker/SOUL.md" "$HERMES_HOME/SOUL.md"
+fi
+
+# MEMORY.md: seed agent memory on first boot if a seed file exists.
+# This gives fresh deploys built-in knowledge about the environment
+# (git auth, known repos, workspace conventions) without wasting context
+# or waiting for the agent to rediscover it.
+if [ ! -f "$HERMES_HOME/memories/MEMORY.md" ] && [ -f "$INSTALL_DIR/docker/MEMORY.md" ]; then
+    cp "$INSTALL_DIR/docker/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md"
+    echo "[entrypoint] Seeded agent memory from docker/MEMORY.md"
 fi
 
 # auth.json: bootstrap from env on first boot only.  Used by orchestrators

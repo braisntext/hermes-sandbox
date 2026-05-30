@@ -298,6 +298,18 @@ def _is_image_size_error(error: Exception) -> bool:
     ))
 
 
+def _is_no_vision_support_error(error: Exception) -> bool:
+    """Detect if an API error means the model does not accept image input."""
+    err_str = str(error).lower()
+    return any(hint in err_str for hint in (
+        "no endpoints found that support image input",
+        "does not support image",
+        "not support vision",
+        "image input",
+        "multimodal",
+    ))
+
+
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
                               max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
@@ -821,6 +833,16 @@ async def vision_analyze_tool(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
                 response = await async_call_llm(**call_kwargs)
+            elif model and _is_no_vision_support_error(_api_err):
+                # Configured model doesn't accept image input — fall back to
+                # auto-detection so a vision-capable backend is used instead.
+                logger.warning(
+                    "Model %s does not support image input; "
+                    "retrying with auto-detected vision backend",
+                    model,
+                )
+                retry_kwargs = {k: v for k, v in call_kwargs.items() if k != "model"}
+                response = await async_call_llm(**retry_kwargs)
             else:
                 raise
         
