@@ -1,0 +1,132 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# BigLobster fork — per-boot config reconciliation.
+#
+# Additive s6 cont-init hook. Runs as root after 01-hermes-setup (the
+# stage2 bootstrap) and before s6-rc starts the dashboard / gateway user
+# services, so any config it writes is fresh by the time those processes
+# read it. Lives in its own file (not inside upstream's stage2-hook.sh) so
+# the fork's deploy logic survives upstream merges with zero conflicts —
+# the only Dockerfile touch is the COPY that installs it.
+#
+# Replaces the env-patching block that used to live in the pre-s6
+# docker/entrypoint.sh (now a deprecated upstream shim). On every boot:
+#   1. Sync Zeabur-injected process env vars into $HERMES_HOME/.env
+#      (env_loader uses load_dotenv(override=True), so .env must win).
+#   2. Re-assert the fork's runtime-critical config.yaml keys (idempotent)
+#      so volumes seeded before a config change still get the intended
+#      provider / model / memory settings. docker/config.yaml remains the
+#      first-boot source of truth (seeded by stage2-hook.sh).
+#   3. Seed memories/MEMORY.md on first boot from docker/MEMORY.md.
+#   4. Log egress reachability for OpenRouter / HuggingFace.
+#
+# Never fatal: a non-zero exit from a cont-init script aborts container
+# boot, so every step is guarded and the script always exits 0.
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+INSTALL_DIR="/opt/hermes"
+PY="$INSTALL_DIR/.venv/bin/python"
+export HERMES_HOME
+
+# Drop to hermes (matching stage2-hook.sh) so files land hermes-owned.
+as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
+
+# --- 1 + 2: env sync + config key enforcement (run as hermes via the venv
+# python, which has PyYAML; bare python3 may not). ---
+as_hermes "$PY" - <<'PYEOF' || echo "[03-biglobster] Warning: config reconcile failed; continuing"
+import os, re
+from pathlib import Path
+
+home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+
+# 1. Sync Zeabur process env → .env (override wins via load_dotenv(override=True)).
+env_path = home / ".env"
+inject = [
+    "OPENROUTER_API_KEY", "HERMES_CALLBACK_SECRET", "HERMES_CALLBACK_URL",
+    "HERMES_MAX_ITERATIONS", "EXA_API_KEY", "HUGGINGFACE_API_KEY",
+    "GITHUB_TOKEN", "AUXILIARY_VISION_MODEL",
+]
+content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+for var in inject:
+    val = os.environ.get(var, "")
+    if not val:
+        continue
+    if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
+        content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+    else:
+        sep = "" if (not content or content.endswith("\n")) else "\n"
+        content += f"{sep}{var}={val}\n"
+env_path.write_text(content, encoding="utf-8")
+print(f"[03-biglobster] Synced env vars into {env_path}")
+
+# 2. Re-assert runtime-critical config keys (idempotent). docker/config.yaml
+#    is the first-boot source of truth; here we only force the keys that must
+#    track the intended deploy even on volumes seeded before a change.
+import yaml
+config_path = home / "config.yaml"
+overrides = {
+    ("web", "backend"): "exa",
+    ("image_gen", "provider"): "openrouter",
+    ("video_gen", "provider"): "huggingface",
+    ("memory", "memory_char_limit"): 6000,
+    ("memory", "user_char_limit"): 3000,
+}
+default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
+if config_path.exists():
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+        changed = False
+        for (section, key), val in overrides.items():
+            if not isinstance(cfg.get(section), dict):
+                cfg[section] = {}
+            if cfg[section].get(key) != val:
+                cfg[section][key] = val
+                changed = True
+        # Preserve the curated image_gen.openrouter.model only if unset.
+        ig = cfg.get("image_gen")
+        if isinstance(ig, dict):
+            ig_or = ig.get("openrouter")
+            if not isinstance(ig_or, dict):
+                ig_or = {}
+            if ig_or.get("model") in (None, ""):
+                ig_or["model"] = "x-ai/grok-imagine-image-quality"
+                ig["openrouter"] = ig_or
+                changed = True
+        # model.default from HERMES_DEFAULT_MODEL when provided.
+        if default_model:
+            mv = cfg.get("model")
+            if isinstance(mv, dict):
+                cur = mv.get("default")
+            elif isinstance(mv, str):
+                cur = mv.strip()
+            else:
+                cur = None
+            if cur != default_model:
+                if isinstance(mv, dict):
+                    mv["default"] = default_model
+                    cfg["model"] = mv
+                else:
+                    cfg["model"] = {"default": default_model, "provider": "openrouter", "base_url": ""}
+                changed = True
+        if changed:
+            config_path.write_text(yaml.dump(cfg, default_flow_style=False))
+            print("[03-biglobster] Reconciled config.yaml keys")
+        else:
+            print("[03-biglobster] config.yaml keys already current")
+    except Exception as e:
+        print(f"[03-biglobster] Warning: config.yaml reconcile failed: {e}")
+else:
+    print("[03-biglobster] config.yaml not present yet — skipping key reconcile")
+PYEOF
+
+# --- 3: seed agent memory on first boot ---
+if [ ! -f "$HERMES_HOME/memories/MEMORY.md" ] && [ -f "$INSTALL_DIR/docker/MEMORY.md" ]; then
+    as_hermes cp "$INSTALL_DIR/docker/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" \
+        && echo "[03-biglobster] Seeded agent memory from docker/MEMORY.md"
+fi
+
+# --- 4: egress diagnostics (non-fatal) ---
+echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
+echo "[03-biglobster] Egress router.huggingface.co: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://router.huggingface.co/ 2>/dev/null || echo FAIL)"
+
+exit 0
