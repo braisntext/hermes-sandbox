@@ -7553,6 +7553,7 @@ class _DelegateRequest(BaseModel):
     task_id: str
     prompt: str
     webhook_url: str
+    profile: Optional[str] = None  # target Hermes profile (customer); None = default profile
 
 
 @app.post("/api/delegate", status_code=202)
@@ -7561,15 +7562,30 @@ async def post_delegate(body: _DelegateRequest):
 
     Returns 202 immediately. When the agent finishes, POSTs the result to
     ``webhook_url`` with ``{"task_id", "status", "response", "error"}``.
+
+    When ``profile`` is set, the task runs in that profile's ``HERMES_HOME``
+    (own workspace, memory, sessions). When omitted, it runs in-process in the
+    default profile (unchanged behavior).
     """
-    asyncio.create_task(_delegate_background(body.task_id, body.prompt, body.webhook_url))
+    asyncio.create_task(
+        _delegate_background(body.task_id, body.prompt, body.webhook_url, body.profile)
+    )
     return {"task_id": body.task_id, "status": "accepted"}
 
 
-async def _delegate_background(task_id: str, prompt: str, webhook_url: str) -> None:
+async def _delegate_background(
+    task_id: str, prompt: str, webhook_url: str, profile: Optional[str] = None
+) -> None:
+    from hermes_cli.delegate_core import run_delegate_agent, run_delegate_in_profile
+
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, _run_delegate_agent, task_id, prompt)
+        if profile:
+            result = await loop.run_in_executor(
+                None, run_delegate_in_profile, task_id, prompt, profile
+            )
+        else:
+            result = await loop.run_in_executor(None, run_delegate_agent, task_id, prompt)
         payload: dict = {
             "task_id": task_id,
             "status": "error" if result.get("error") else "completed",
@@ -7595,68 +7611,9 @@ async def _delegate_background(task_id: str, prompt: str, webhook_url: str) -> N
         )
 
 
-_DELEGATE_SYSTEM_PROMPT = (
-    "You are executing a delegated task from an external orchestrator (BigLobster). "
-    "Complete it fully and autonomously — no clarifying questions.\n\n"
-    "TOOL USE: Always use your tools — never produce a code artifact as a substitute.\n"
-    "- Image generation → call `image_generate`. Do NOT write HTML/CSS/JS to simulate an image.\n"
-    "- The generated image path is returned in the tool result. Reference it in your response.\n\n"
-    "FILE OUTPUT: The only writable volume is /opt/data/. Write output files there.\n"
-    "- Use /opt/data/biglobster/ for BigLobster-related output.\n"
-    "- Create subdirectories as needed with shell commands or write_file.\n"
-    "- Do NOT write to /workspace/, /tmp/, or any path outside /opt/data/."
-)
-
-
-def _run_delegate_agent(task_id: str, prompt: str) -> dict:
-    """Synchronous agent runner — called inside a thread-pool executor."""
-    import uuid
-    from run_agent import AIAgent
-    from hermes_cli.config import load_config
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    from hermes_state import SessionDB
-
-    config = load_config()
-    model_cfg = config.get("model")
-    default_model = ""
-    config_provider = None
-    if isinstance(model_cfg, dict):
-        default_model = str(model_cfg.get("default") or "")
-        config_provider = model_cfg.get("provider")
-    elif isinstance(model_cfg, str) and model_cfg.strip():
-        default_model = model_cfg.strip()
-
-    try:
-        session_db = SessionDB()
-    except Exception:
-        _log.warning("Delegate: SessionDB unavailable, session will not be persisted")
-        session_db = None
-
-    kwargs: Dict[str, Any] = {
-        "platform": "api",
-        "quiet_mode": True,
-        "session_id": task_id or str(uuid.uuid4()),
-        "model": default_model,
-        "session_db": session_db,
-        "ephemeral_system_prompt": _DELEGATE_SYSTEM_PROMPT,
-    }
-    try:
-        runtime = resolve_runtime_provider(requested=config_provider)
-        kwargs.update(
-            {
-                "provider": runtime.get("provider"),
-                "api_mode": runtime.get("api_mode"),
-                "base_url": runtime.get("base_url"),
-                "api_key": runtime.get("api_key"),
-                "command": runtime.get("command"),
-                "args": list(runtime.get("args") or []),
-            }
-        )
-    except Exception:
-        _log.debug("Delegate falling back to default provider resolution", exc_info=True)
-
-    agent = AIAgent(**kwargs)
-    return agent.run_conversation(user_message=prompt, task_id=task_id)
+# Delegate task execution (system prompt + agent runner, in-process and
+# profile-scoped subprocess paths) lives in hermes_cli/delegate_core.py.
+# See _delegate_background above.
 
 
 def _mount_plugin_api_routes():
