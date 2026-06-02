@@ -82,7 +82,7 @@ For model changes or env var updates, use Zeabur Variables instead:
 
 `deepseek/deepseek-v4-flash` via OpenRouter.
 
-Set via `HERMES_DEFAULT_MODEL` env var in Zeabur — the entrypoint updates `config.yaml` on the persistent volume at every boot. The `docker/config.yaml` in the repo also reflects this as the default.
+Set via `HERMES_DEFAULT_MODEL` env var in Zeabur — the `03-biglobster-config` boot hook updates `config.yaml` on the persistent volume at every boot. The `docker/config.yaml` in the repo also reflects this as the default.
 
 ### Why not owl-alpha
 `openrouter/owl-alpha` was the original model but became unstable (consistent "Provider returned error" on OpenRouter). Switched 2026-05-21.
@@ -105,11 +105,20 @@ The CEO can talk directly to Hermes without going through BigLobster/COO:
 
 The Hermes gateway handles Telegram messages and BigLobster delegation. It starts **automatically** on every container boot — no manual step needed.
 
-**Boot sequence:**
-1. Container starts → dashboard launches on port 9119 (background)
-2. Entrypoint polls `/health` (1s intervals, 30s max)
-3. Once dashboard responds → `hermes gateway restart` runs automatically
-4. Logs: `[entrypoint] Dashboard ready (Xs). Auto-starting gateway...` → `[entrypoint] Gateway auto-start complete.`
+**Boot sequence (s6-overlay, since the 2026-06 upstream upgrade):**
+1. `/init` (PID 1) brings up the s6 supervision tree and runs the `cont-init.d` hooks:
+   `01-hermes-setup` (UID remap, volume chown, config/SOUL seed, skills sync) →
+   `015-supervise-perms` → `02-reconcile-profiles` (recreates per-profile gateway s6
+   slots from the volume and **auto-starts any whose last `gateway_state.json` was
+   `running`** — this is what restarts the gateway across restarts) →
+   `03-biglobster-config` (env sync, config key enforcement, MEMORY seed, egress check).
+2. s6 then starts the supervised `dashboard` service (when `HERMES_DASHBOARD=1`) on port 9119
+   and the (no-op) `main-hermes` slot; the container's `CMD` (`sleep infinity`) runs as the
+   s6 "main program" so the container stays alive while the dashboard + gateways serve.
+
+The pre-s6 entrypoint that polled `/health` then ran `hermes gateway restart` is gone; the
+gateway is now restored natively by `container_boot.py` (cont-init `02`) from the persisted
+`gateway_state.json` on the volume.
 
 **To manually restart the gateway** (e.g. after changing Telegram env vars):
 1. Go to `https://blhermes.zeabur.app`
@@ -121,7 +130,7 @@ Check status: Gateway Status should show **RUNNING** in the bottom-left of the p
 
 ## Mounted workspaces
 
-The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent volume, `HERMES_HOME=/opt/data`). The entrypoint pre-creates `/opt/data/workspace/` on boot.
+The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent volume, `HERMES_HOME=/opt/data`). The `stage2-hook.sh` cont-init step pre-creates `/opt/data/workspace/` on boot.
 
 > ⚠️ `/workspace/` does **not** exist at the container root. All paths must be under `/opt/data/`.
 
@@ -139,7 +148,7 @@ The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent v
 
 ## Available tools
 
-Hermes activates tools based on configured API keys. The entrypoint forces provider settings into `config.yaml` on every boot.
+Hermes activates tools based on configured API keys. The `03-biglobster-config` boot hook forces provider settings into `config.yaml` on every boot.
 
 | Toolset | Provider | Key required | Notes |
 |---------|----------|-------------|-------|
@@ -204,23 +213,23 @@ curl -X POST http://hermes-sandbox.zeabur.internal:9119/api/delegate \
 
 ## Startup log verification
 
-After every Zeabur restart, confirm these lines appear in the logs:
+After every Zeabur restart, confirm these lines appear in the logs (s6-overlay format
+since the 2026-06 upgrade — the old `[entrypoint] …` lines are gone):
 
 ```
-[entrypoint] model.default already set to deepseek/deepseek-v4-flash
-[entrypoint] web.backend already set to 'exa'
-[entrypoint] image_gen.provider already set to 'openrouter'
-[entrypoint] video_gen.provider already set to 'huggingface'
-[entrypoint] Dashboard ready (Xs). Auto-starting gateway...
-[entrypoint] Gateway auto-start complete.
+[03-biglobster] Synced env vars into /opt/data/.env
+[03-biglobster] config.yaml keys already current   (or "Reconciled config.yaml keys")
+[03-biglobster] Egress openrouter.ai: 200
+[03-biglobster] Egress router.huggingface.co: 200   (or FAIL if Zeabur blocks it)
 [startup] Model: deepseek/deepseek-v4-flash | Provider: openrouter | API key present: True
 ```
 
-Also check egress:
-```
-[entrypoint] Egress check: openrouter.ai 200
-[entrypoint] Egress check: router.huggingface.co 200   (or FAIL if Zeabur blocks it)
-```
+The native gateway reconciler (cont-init `02`) logs one line per profile, e.g.
+`reconcile … default … started` (or `registered` if its last state wasn't `running`).
+**The gateway should come up automatically** because the volume's `gateway_state.json`
+already records `running`. If — only on the very first upgrade boot — it comes up
+`registered`/down instead, click **Restart Gateway** once in the web panel; it self-heals
+on every subsequent restart.
 
 If `API key present: False` or `Provider resolution FAILED` → check `OPENROUTER_API_KEY` in Zeabur Variables.
 
@@ -235,6 +244,27 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 ---
 
 ## Incident log
+
+### 2026-06-02 — Upstream upgrade (v0.13.0 → v2026.5.29.x) + tini→s6-overlay
+
+Merged ~1,980 upstream commits (`hermes-upstream-upgrade` branch) and folded in the
+profile-scoped `/api/delegate` work (1a). Key changes affecting ops:
+
+1. **tini → s6-overlay.** The container ENTRYPOINT is now `/init`; the old
+   `docker/entrypoint.sh` is a deprecated upstream shim. Bootstrap (UID remap, chown,
+   config/SOUL seed, skills sync) runs in `docker/stage2-hook.sh` via cont-init `01`.
+2. **Our env-patching re-homed** out of `entrypoint.sh` into a new additive
+   `docker/cont-init.d/03-biglobster-config` (env sync, config key enforcement, MEMORY
+   seed, egress check). Logs now prefixed `[03-biglobster]`, not `[entrypoint]`.
+3. **Gateway autostart is now native** (`container_boot.py`, cont-init `02`): restored from
+   the volume's `gateway_state.json` instead of an entrypoint `/health`-poll loop.
+4. **Dashboard is a supervised s6 service**; `config.yaml` first-boot seed source switched to
+   `docker/config.yaml`; `/api/delegate` moved into the shared `dashboard_auth/public_paths.py`
+   allowlist (covers both the session-token and OAuth gates).
+5. **Config schema migrated v23 → v25** automatically on boot (non-destructive, additive).
+
+Verified pre-deploy: 476 tests green (image_gen, web_server/delegate/callback-auth/host-header,
+container_boot) + config-migration smoke. Deploy = same flow below (Cloud Build → GHCR → Zeabur restart).
 
 ### 2026-05-23 — Crash loop after OpenRouter 403
 
