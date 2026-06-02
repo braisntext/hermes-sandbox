@@ -61,7 +61,7 @@ For model changes or env var updates, use Zeabur Variables instead:
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
 | `HERMES_CALLBACK_SECRET` | Yes | Shared secret for callback auth. Must match BigLobster's value. |
 | `HERMES_CALLBACK_URL` | Yes | `https://biglobster.top/api/hermes-callback` |
-| `HERMES_DEFAULT_MODEL` | Yes | Active model. Currently: `deepseek/deepseek-v4-flash` |
+| `HERMES_DEFAULT_MODEL` | Yes | Active model. Currently: `openrouter/owl-alpha` |
 | `HERMES_MAX_ITERATIONS` | No | Max agent turns per task (default: 60) |
 | `HERMES_DASHBOARD` | Yes | Set to `1` to start the web dashboard on port 9119 |
 | `TELEGRAM_BOT_TOKEN` | No | Token for direct CEO ↔ Hermes Telegram chat (@b_l_hermes_bot) |
@@ -80,12 +80,12 @@ For model changes or env var updates, use Zeabur Variables instead:
 
 ## Model
 
-`deepseek/deepseek-v4-flash` via OpenRouter.
+`openrouter/owl-alpha` via OpenRouter (active as of 2026-06-02).
 
-Set via `HERMES_DEFAULT_MODEL` env var in Zeabur — the `03-biglobster-config` boot hook updates `config.yaml` on the persistent volume at every boot. The `docker/config.yaml` in the repo also reflects this as the default.
+Set via `HERMES_DEFAULT_MODEL` env var in Zeabur — the `03-biglobster-config` boot hook updates `config.yaml` on the persistent volume at every boot. The `docker/config.yaml` in the repo also reflects this as the default. `deepseek/deepseek-v4-flash` is kept as the `fallback_model`.
 
-### Why not owl-alpha
-`openrouter/owl-alpha` was the original model but became unstable (consistent "Provider returned error" on OpenRouter). Switched 2026-05-21.
+### owl-alpha instability window (resolved)
+`openrouter/owl-alpha` was the original model. It hit a stretch of "Provider returned error" failures on OpenRouter around 2026-05-21, so we temporarily switched the default to `deepseek/deepseek-v4-flash`. owl-alpha has since recovered and is back as the active model (2026-06-02); deepseek remains the fallback.
 
 ### Why not tencent/hy3-preview
 In Hermes, the `tencent/` prefix resolves to the `tencent-tokenhub` provider (TokenHub API), not OpenRouter. Using it as the default causes a startup crash because `TOKENHUB_API_KEY` is not set.
@@ -158,6 +158,19 @@ Hermes activates tools based on configured API keys. The `03-biglobster-config` 
 
 Plugins live in `plugins/image_gen/` and `plugins/video_gen/` — **baked into the Docker image**, not synced at boot. Changes require a rebuild.
 
+### ⚠️ Known limitation — HuggingFace egress blocked on Zeabur (TODO: fix)
+
+Zeabur blocks/blackholes egress to `router.huggingface.co` — the boot egress check
+reports `router.huggingface.co 404FAIL` (vs `openrouter.ai 200`). As a result the
+**`video_gen` (HuggingFace) toolset does not work in production**, and any HF-backed
+provider is unreachable from the container. `image_gen` (OpenRouter) and `web` (Exa)
+are unaffected.
+
+**To fix in the future** (options, not yet decided):
+- Route HF traffic through an egress proxy / allowed host, or
+- Switch `video_gen` to a provider Zeabur can reach (e.g. an OpenRouter or fal video model), or
+- Confirm with Zeabur whether the HF egress block can be lifted for this project.
+
 ---
 
 ## Skills
@@ -221,7 +234,7 @@ since the 2026-06 upgrade — the old `[entrypoint] …` lines are gone):
 [03-biglobster] config.yaml keys already current   (or "Reconciled config.yaml keys")
 [03-biglobster] Egress openrouter.ai: 200
 [03-biglobster] Egress router.huggingface.co: 200   (or FAIL if Zeabur blocks it)
-[startup] Model: deepseek/deepseek-v4-flash | Provider: openrouter | API key present: True
+[startup] Model: openrouter/owl-alpha | Provider: openrouter | API key present: True
 ```
 
 The native gateway reconciler (cont-init `02`) logs one line per profile, e.g.

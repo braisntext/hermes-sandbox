@@ -1,5 +1,5 @@
 model:
-  default: deepseek/deepseek-v4-flash
+  default: openrouter/owl-alpha
   provider: openrouter
   base_url: ''
 providers: {}
