@@ -120,12 +120,28 @@ def run_delegate_in_profile(task_id: str, prompt: str, profile: str) -> dict:
         return {"final_response": "", "error": f"Invalid delegate profile {profile!r}: {exc}"}
 
     env = {**os.environ, "HERMES_HOME": profile_home}
+
+    # Scope the subprocess's working directory to the profile's own workspace.
+    # Without this the subprocess inherits the web-server process's cwd (the
+    # default HERMES_HOME root, e.g. /opt/data), so a customer task would
+    # operate in — and could read/write — the default profile's files and
+    # other tenants' data. Anchoring cwd to <profile_home>/workspace keeps a
+    # delegated task's file operations inside its own profile. Created on
+    # demand so a freshly-onboarded profile still has a valid cwd; falls back
+    # to the profile root if the workspace dir can't be created.
+    workdir = os.path.join(profile_home, "workspace")
+    try:
+        os.makedirs(workdir, exist_ok=True)
+    except OSError:
+        workdir = profile_home
+
     cmd = [sys.executable, "-m", "hermes_cli.delegate_runner", task_id]
     try:
         proc = subprocess.run(
             cmd,
             input=prompt,
             env=env,
+            cwd=workdir,
             capture_output=True,
             text=True,
             timeout=_DEFAULT_DELEGATE_TIMEOUT,
