@@ -44,7 +44,15 @@ Zeabur's build timeout is too short for the 2.7GB image (Playwright + Chromium +
    gcloud builds submit --config=cloudbuild.yaml --substitutions=_GITHUB_TOKEN="<ghcr_pat>"
    ```
    Cloud Build builds the image and pushes it to `ghcr.io/braisntext/hermes-sandbox:latest`.
+   - **First pull `main` in this checkout** (`git checkout main && git pull`) — `gcloud builds submit` packages the *working tree*, not GitHub. If you merge a PR on GitHub but don't pull, the build ships stale code. Verify with `grep ENTRYPOINT Dockerfile` → it should show `/init`.
 3. Restart Hermes service in Zeabur dashboard
+
+> ⚠️ **s6 cold-boot health check.** Since the s6 upgrade the dashboard starts *after* all
+> cont-init hooks (skills sync, etc.), so port 9119 binds ~20–40s into boot — later than the
+> old image. Zeabur's startup/readiness probe on `9119` must tolerate this or it kills the pod
+> mid-boot in a restart loop. Use a lenient probe: **TCP 9119, initial delay 60s, period 10s,
+> failure threshold 12** (≈2 min grace). Also requires `HERMES_DASHBOARD_INSECURE=1` (see env
+> table) or the dashboard refuses to bind at all.
 
 ### Config-only changes (no rebuild needed)
 
@@ -64,6 +72,7 @@ For model changes or env var updates, use Zeabur Variables instead:
 | `HERMES_DEFAULT_MODEL` | Yes | Active model. Currently: `openrouter/owl-alpha` |
 | `HERMES_MAX_ITERATIONS` | No | Max agent turns per task (default: 60) |
 | `HERMES_DASHBOARD` | Yes | Set to `1` to start the web dashboard on port 9119 |
+| `HERMES_DASHBOARD_INSECURE` | Yes | Set to `1`. Since the s6 upgrade, the dashboard **refuses to bind to `0.0.0.0`** without this (the OAuth gate engages on non-loopback binds and no auth provider is configured). Without it the dashboard never comes up → Zeabur health probe fails → restart loop. See the deploy note below. |
 | `TELEGRAM_BOT_TOKEN` | No | Token for direct CEO ↔ Hermes Telegram chat (@b_l_hermes_bot) |
 | `TELEGRAM_ALLOWED_USERS` | No | CEO's Telegram user ID for direct access |
 | `EXA_API_KEY` | No | Exa web search API key — activates the `web` toolset |
@@ -277,7 +286,22 @@ profile-scoped `/api/delegate` work (1a). Key changes affecting ops:
 5. **Config schema migrated v23 → v25** automatically on boot (non-destructive, additive).
 
 Verified pre-deploy: 476 tests green (image_gen, web_server/delegate/callback-auth/host-header,
-container_boot) + config-migration smoke. Deploy = same flow below (Cloud Build → GHCR → Zeabur restart).
+container_boot) + config-migration smoke.
+
+**Deploy gotchas hit during rollout (all resolved — read before the next deploy):**
+1. **Stale build context.** Merging the PR on GitHub isn't enough — `gcloud builds submit`
+   tars the local working tree. The first build shipped pre-upgrade code because `main`
+   wasn't pulled. Always `git checkout main && git pull` first; verify `grep ENTRYPOINT
+   Dockerfile` shows `/init`.
+2. **Dashboard refuses to bind** without `HERMES_DASHBOARD_INSECURE=1` — the new OAuth gate
+   engages on the `0.0.0.0` bind and there's no auth provider configured. Added that Zeabur var.
+   (Restores the old image's posture, which auto-ran insecure on non-loopback binds.)
+3. **Health-check restart loop.** Under s6 the dashboard binds ~20–40s into boot (after
+   cont-init), later than the old image, so Zeabur's tight probe killed the pod mid-boot.
+   Fixed by a lenient probe (TCP 9119, initial delay 60s, failure threshold 12).
+
+Post-deploy verified live: v0.15.1, gateway RUNNING, Telegram OK, `/api/delegate` with
+`profile:"grow-shop"` → `accepted`. Known issue unchanged: HF egress blocked (video_gen).
 
 ### 2026-05-23 — Crash loop after OpenRouter 403
 
