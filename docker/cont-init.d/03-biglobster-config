@@ -127,6 +127,8 @@ fi
 
 # --- 4: egress diagnostics (non-fatal) ---
 echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
-echo "[03-biglobster] Egress router.huggingface.co: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://router.huggingface.co/ 2>/dev/null || echo FAIL)"
+# Probe the real router endpoint (/v1/models returns 200 without auth); the
+# bare root 404s by design, which made the old check a false negative.
+echo "[03-biglobster] Egress router.huggingface.co: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://router.huggingface.co/v1/models 2>/dev/null || echo FAIL)"
 
 exit 0
