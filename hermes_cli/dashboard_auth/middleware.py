@@ -17,18 +17,61 @@ binds.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable
+import time
+from typing import Awaitable, Callable, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from hermes_cli.dashboard_auth import list_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
-from hermes_cli.dashboard_auth.base import ProviderError
+from hermes_cli.dashboard_auth.base import ProviderError, Session
 from hermes_cli.dashboard_auth.cookies import read_session_cookies
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Verified-session cache
+# ---------------------------------------------------------------------------
+#
+# Maps ``access_token -> (Session, exp_epoch_seconds)``. A hit skips the
+# provider's ``verify_session`` (JWKS fetch + RS256 verify), which runs
+# synchronously and, on a single uvicorn worker, otherwise serialises every
+# gated request — the SPA fires ~10+ ``/api/*`` calls per page, and the 5-min
+# JWKS refresh blocks the whole event loop while it fetches.
+#
+# Safe under OAuth contract v1: an access token is immutable until its ``exp``
+# claim, there is no refresh token, and ``revoke_session`` is a documented
+# no-op — so re-verifying an unexpired token would accept the exact same
+# session. The entry is therefore valid until the token's own ``exp``; an
+# expired token is never served (checked on every read).
+#
+# A coarse size cap keeps memory bounded under token churn (every distinct
+# token is a new key). On overflow we drop the whole map rather than track
+# LRU: the cost is a one-off re-verify burst, never a correctness issue.
+_VERIFIED_CACHE: dict[str, tuple[Session, int]] = {}
+_VERIFIED_CACHE_MAX = 512
+
+
+def _verified_cache_get(access_token: str, now: int) -> Optional[Session]:
+    entry = _VERIFIED_CACHE.get(access_token)
+    if entry is None:
+        return None
+    session, exp = entry
+    if exp <= now:
+        _VERIFIED_CACHE.pop(access_token, None)
+        return None
+    return session
+
+
+def _verified_cache_put(access_token: str, session: Session) -> None:
+    if len(_VERIFIED_CACHE) >= _VERIFIED_CACHE_MAX:
+        _VERIFIED_CACHE.clear()
+    _VERIFIED_CACHE[access_token] = (session, int(session.expires_at))
+
 
 # Prefixes that bypass the auth gate. Match via ``path == prefix`` or
 # ``path.startswith(prefix)`` — so ``/assets/`` (with trailing slash)
@@ -188,14 +231,26 @@ async def gated_auth_middleware(
     if not at:
         return _unauth_response(request, reason="no_cookie")
 
+    # Fast path: a previously-verified, still-unexpired token skips the
+    # synchronous JWKS fetch + RS256 verify below. See _VERIFIED_CACHE.
+    now = int(time.time())
+    cached_session = _verified_cache_get(at, now)
+    if cached_session is not None:
+        request.state.session = cached_session
+        return await call_next(request)
+
     # Try every registered provider's verify_session in turn. Providers
     # MUST return None for tokens they don't recognise (not raise). This
     # lets multiple providers stack — the first one that recognises a
-    # token wins.
+    # token wins. verify_session does blocking network I/O (JWKS fetch)
+    # and CPU-bound RS256; offload it so a cold verify / JWKS refresh
+    # doesn't stall the single-worker event loop for other requests.
     session = None
     for provider in list_providers():
         try:
-            session = provider.verify_session(access_token=at)
+            session = await run_in_threadpool(
+                provider.verify_session, access_token=at
+            )
         except ProviderError as e:
             _log.warning(
                 "dashboard-auth: provider %r unreachable during verify: %s",
@@ -233,4 +288,5 @@ async def gated_auth_middleware(
         return response
 
     request.state.session = session
+    _verified_cache_put(at, session)
     return await call_next(request)
