@@ -86,6 +86,50 @@ _log = logging.getLogger(__name__)
 
 app = FastAPI(title="Hermes Agent", version=__version__)
 
+# ---------------------------------------------------------------------------
+# Shared SessionDB for read-only dashboard queries
+# ---------------------------------------------------------------------------
+# The dashboard fires ~10+ /api/* calls per page and many of them open a fresh
+# SessionDB() — which creates a new SQLite connection every time.  Keep a
+# single shared connection for read-only dashboard endpoints; reconnect
+# automatically if the underlying file was replaced (e.g. after a DB reset).
+_dashboard_db_instance: "Optional[Any]" = None
+_dashboard_db_class: "Optional[type]" = None
+_dashboard_db_path: "Optional[str]" = None
+_dashboard_db_lock = threading.Lock()
+
+
+def _get_dashboard_db():
+    """Return a shared SessionDB for read-only dashboard queries.
+
+    Invalidates when the DB class changes (test monkeypatching), when
+    DEFAULT_DB_PATH changes (per-test isolation), or when the SQLite connection
+    is broken (DB file swapped after ``hermes memory reset``).
+    """
+    global _dashboard_db_instance, _dashboard_db_class, _dashboard_db_path
+    from hermes_state import SessionDB, DEFAULT_DB_PATH
+
+    current_path = str(DEFAULT_DB_PATH)
+
+    if _dashboard_db_class is not SessionDB or _dashboard_db_path != current_path:
+        _dashboard_db_instance = None
+    elif _dashboard_db_instance is not None:
+        conn = getattr(_dashboard_db_instance, "_conn", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except Exception:
+                _dashboard_db_instance = None
+
+    if _dashboard_db_instance is None:
+        with _dashboard_db_lock:
+            if _dashboard_db_instance is None:
+                _dashboard_db_instance = SessionDB()
+                _dashboard_db_class = SessionDB
+                _dashboard_db_path = current_path
+    return _dashboard_db_instance
+
+
 # Vite builds with content-hashed filenames (index-BcgXqjdx.js) so assets at
 # /assets/* are immutable — the URL itself changes when content changes. Tell
 # browsers and proxies they can cache forever and never revalidate.
@@ -726,18 +770,14 @@ async def get_status():
 
     active_sessions = 0
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
-        try:
-            sessions = db.list_sessions_rich(limit=50)
-            now = time.time()
-            active_sessions = sum(
-                1 for s in sessions
-                if s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0))) < 300
-            )
-        finally:
-            db.close()
+        db = _get_dashboard_db()
+        sessions = db.list_sessions_rich(limit=50)
+        now = time.time()
+        active_sessions = sum(
+            1 for s in sessions
+            if s.get("ended_at") is None
+            and (now - s.get("last_active", s.get("started_at", 0))) < 300
+        )
     except Exception:
         pass
 
@@ -1399,35 +1439,31 @@ async def get_sessions(
             detail="archived must be one of: exclude, only, include",
         )
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
-        try:
-            min_message_count = max(0, min_messages)
-            archived_only = archived == "only"
-            include_archived = archived == "include"
-            sessions = db.list_sessions_rich(
-                limit=limit,
-                offset=offset,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
+        db = _get_dashboard_db()
+        min_message_count = max(0, min_messages)
+        archived_only = archived == "only"
+        include_archived = archived == "include"
+        sessions = db.list_sessions_rich(
+            limit=limit,
+            offset=offset,
+            min_message_count=min_message_count,
+            include_archived=include_archived,
+            archived_only=archived_only,
+        )
+        total = db.session_count(
+            min_message_count=min_message_count,
+            include_archived=include_archived,
+            archived_only=archived_only,
+        )
+        now = time.time()
+        for s in sessions:
+            s["is_active"] = (
+                s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0))) < 300
             )
-            total = db.session_count(
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-            )
-            now = time.time()
-            for s in sessions:
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
-                )
-                # SQLite stores the flag as 0/1; expose a real JSON boolean.
-                s["archived"] = bool(s.get("archived"))
-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
-        finally:
-            db.close()
+            # SQLite stores the flag as 0/1; expose a real JSON boolean.
+            s["archived"] = bool(s.get("archived"))
+        return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
     except Exception:
         _log.exception("GET /api/sessions failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1439,37 +1475,33 @@ async def search_sessions(q: str = "", limit: int = 20):
     if not q or not q.strip():
         return {"results": []}
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
-        try:
-            # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
-            # Preserve quoted phrases and existing wildcards as-is
-            import re
-            terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
-                if token.startswith('"') or token.endswith("*"):
-                    terms.append(token)
-                else:
-                    terms.append(token + "*")
-            prefix_query = " ".join(terms)
-            matches = db.search_messages(query=prefix_query, limit=limit)
-            # Group by session_id — return unique sessions with their best snippet
-            seen: dict = {}
-            for m in matches:
-                sid = m["session_id"]
-                if sid not in seen:
-                    seen[sid] = {
-                        "session_id": sid,
-                        "snippet": m.get("snippet", ""),
-                        "role": m.get("role"),
-                        "source": m.get("source"),
-                        "model": m.get("model"),
-                        "session_started": m.get("session_started"),
-                    }
-            return {"results": list(seen.values())}
-        finally:
-            db.close()
+        db = _get_dashboard_db()
+        # Auto-add prefix wildcards so partial words match
+        # e.g. "nimb" → "nimb*" matches "nimby"
+        # Preserve quoted phrases and existing wildcards as-is
+        import re
+        terms = []
+        for token in re.findall(r'"[^"]*"|\S+', q.strip()):
+            if token.startswith('"') or token.endswith("*"):
+                terms.append(token)
+            else:
+                terms.append(token + "*")
+        prefix_query = " ".join(terms)
+        matches = db.search_messages(query=prefix_query, limit=limit)
+        # Group by session_id — return unique sessions with their best snippet
+        seen: dict = {}
+        for m in matches:
+            sid = m["session_id"]
+            if sid not in seen:
+                seen[sid] = {
+                    "session_id": sid,
+                    "snippet": m.get("snippet", ""),
+                    "role": m.get("role"),
+                    "source": m.get("source"),
+                    "model": m.get("model"),
+                    "session_started": m.get("session_started"),
+                }
+        return {"results": list(seen.values())}
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
@@ -5683,7 +5715,8 @@ async def get_profile_soul(name: str):
     soul_path = _resolve_profile_dir(name) / "SOUL.md"
     if soul_path.exists():
         try:
-            return {"content": soul_path.read_text(encoding="utf-8"), "exists": True}
+            content = await asyncio.to_thread(soul_path.read_text, encoding="utf-8")
+            return {"content": content, "exists": True}
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"Could not read SOUL.md: {e}")
     return {"content": "", "exists": False}
@@ -5909,7 +5942,7 @@ async def get_config_raw():
     path = get_config_path()
     if not path.exists():
         return {"yaml": ""}
-    return {"yaml": path.read_text(encoding="utf-8")}
+    return {"yaml": await asyncio.to_thread(path.read_text, encoding="utf-8")}
 
 
 @app.put("/api/config/raw")
@@ -6647,6 +6680,11 @@ def mount_spa(application: FastAPI):
         return
 
     _index_path = WEB_DIST / "index.html"
+    # Cache rendered index.html per (prefix, gated) pair.  The file content
+    # and all injected values (_SESSION_TOKEN, auth_required, embedded-chat
+    # flag) are fixed for the lifetime of the server process, so reading and
+    # rewriting the HTML on every SPA route navigation is pure waste.
+    _index_cache: dict[tuple, HTMLResponse] = {}
 
     def _serve_index(prefix: str = ""):
         """Return index.html with the session token + base-path injected.
@@ -6660,6 +6698,10 @@ def mount_spa(application: FastAPI):
         ``__HERMES_AUTH_REQUIRED__`` flag lets the SPA pick the right
         auth scheme for /api/pty and /api/ws (ticket vs token).
         """
+        gated = bool(getattr(app.state, "auth_required", False))
+        _cache_key = (prefix, gated)
+        if _cache_key in _index_cache:
+            return _index_cache[_cache_key]
         html = _index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
@@ -6690,10 +6732,12 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
         html = html.replace("</head>", f"{bootstrap_script}</head>", 1)
-        return HTMLResponse(
+        resp = HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+        _index_cache[_cache_key] = resp
+        return resp
 
     # When served behind a path-prefix proxy, the built CSS contains
     # absolute ``url(/fonts/...)`` and ``url(/ds-assets/...)`` references.
@@ -6710,7 +6754,7 @@ def mount_spa(application: FastAPI):
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        css = css_path.read_text()
+        css = await asyncio.to_thread(css_path.read_text)
         if prefix:
             for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
                 css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
