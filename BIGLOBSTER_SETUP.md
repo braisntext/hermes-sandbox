@@ -77,6 +77,7 @@ For model changes or env var updates, use Zeabur Variables instead:
 | `TELEGRAM_ALLOWED_USERS` | No | CEO's Telegram user ID for direct access |
 | `EXA_API_KEY` | No | Exa web search API key — activates the `web` toolset |
 | `HUGGINGFACE_API_KEY` | No | HuggingFace token — activates `video_gen` (text-to-video) |
+| `GITHUB_TOKEN` | No | GitHub PAT (fine-grained, `contents:write` + `pull_requests:write`). At boot, `03-biglobster-config` writes it into `~/.git-credentials` so `git push/clone` over HTTPS works without prompts. Refresh = rotate token in Zeabur + restart. |
 
 ## Zeabur environment variables (BigLobster service)
 
@@ -167,18 +168,15 @@ Hermes activates tools based on configured API keys. The `03-biglobster-config` 
 
 Plugins live in `plugins/image_gen/` and `plugins/video_gen/` — **baked into the Docker image**, not synced at boot. Changes require a rebuild.
 
-### ⚠️ Known limitation — HuggingFace egress blocked on Zeabur (TODO: fix)
+### HuggingFace egress
 
-Zeabur blocks/blackholes egress to `router.huggingface.co` — the boot egress check
-reports `router.huggingface.co 404FAIL` (vs `openrouter.ai 200`). As a result the
-**`video_gen` (HuggingFace) toolset does not work in production**, and any HF-backed
-provider is unreachable from the container. `image_gen` (OpenRouter) and `web` (Exa)
-are unaffected.
+Egress to `router.huggingface.co` is reachable from Zeabur (confirmed 2026-06-05). The
+earlier "blocked" diagnosis was a false negative — the boot check was hitting the bare root
+`/` which HF returns a 404 on by design. Fixed in PR #10: probe now targets
+`/v1/models` (returns 200 without auth).
 
-**To fix in the future** (options, not yet decided):
-- Route HF traffic through an egress proxy / allowed host, or
-- Switch `video_gen` to a provider Zeabur can reach (e.g. an OpenRouter or fal video model), or
-- Confirm with Zeabur whether the HF egress block can be lifted for this project.
+`video_gen` (HuggingFace) requires `HUGGINGFACE_API_KEY` to be set in Zeabur. If it fails
+in prod, suspect a missing/invalid key or model availability — not network egress.
 
 ---
 

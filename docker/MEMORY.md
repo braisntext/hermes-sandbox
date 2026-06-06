@@ -1,6 +1,6 @@
-GitHub HTTPS auth: password auth is disabled. Always inject GITHUB_TOKEN. Use: git clone https://x-access-token:$GITHUB_TOKEN@github.com/<owner>/<repo>.git — or run the github-auth skill to set up credential.helper store so the token persists across git calls.
+GitHub HTTPS auth: pre-configured at every boot via 03-biglobster-config. git credential.helper store is set, ~/.git-credentials contains x-access-token:$GITHUB_TOKEN, and git identity is "Hermes Agent <hermes@agent.local>". Standard git push/clone/fetch over HTTPS works out of the box — no manual setup needed. If it fails, check GITHUB_TOKEN is set in Zeabur Variables (restart required after adding it).
 §
-GITHUB_TOKEN is available as an env var (set via Zeabur) and in /opt/data/.env. Before any git push/clone/fetch, verify it is set: [ -n "$GITHUB_TOKEN" ] || echo "GITHUB_TOKEN missing". If missing, ask the user to set it in the Zeabur env var panel.
+GITHUB_TOKEN is available as an env var (set via Zeabur) and in /opt/data/.env. Token is refreshed in .git-credentials on every boot, so a rotated token takes effect after a Zeabur restart. gh CLI is NOT installed — use git + curl with Authorization: token $GITHUB_TOKEN for GitHub API calls.
 §
 git identity must be configured before any commit: git config --global user.name "Hermes Agent" && git config --global user.email "hermes@agent.local". Check first with: git config --global user.name.
 §
