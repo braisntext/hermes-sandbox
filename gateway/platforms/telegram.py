@@ -5903,6 +5903,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id_str = self._GENERAL_TOPIC_THREAD_ID
         chat_topic = None
         topic_skill = None
+        topic_profile = None
 
         if chat_type == "dm" and thread_id_str:
             topic_info = self._get_dm_topic_info(str(chat.id), thread_id_str)
@@ -5919,7 +5920,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         chat_topic = created_name
 
         elif chat_type == "group" and thread_id_str:
-            # Group/supergroup forum topic skill binding via config.extra['group_topics']
+            # Group/supergroup forum topic skill + profile binding via config.extra['group_topics']
             group_topics_config: list = self.config.extra.get("group_topics", [])
             for chat_entry in group_topics_config:
                 if str(chat_entry.get("chat_id", "")) == str(chat.id):
@@ -5928,6 +5929,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         if tid is not None and str(tid) == thread_id_str:
                             chat_topic = topic.get("name")
                             topic_skill = topic.get("skill")
+                            topic_profile = topic.get("profile") or None
                             break
                     break
 
@@ -5997,6 +5999,7 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_id,
             reply_to_text=reply_to_text,
             auto_skill=topic_skill,
+            auto_profile=topic_profile,
             channel_prompt=_channel_prompt,
             timestamp=message.date,
         )

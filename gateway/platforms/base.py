@@ -1427,6 +1427,12 @@ class MessageEvent:
     # Discord channel_skill_bindings).  A single name or ordered list.
     auto_skill: Optional[str | list[str]] = None
 
+    # Hermes profile to run this message in.  When set, the gateway dispatches
+    # the message to a per-customer profile subprocess (HERMES_HOME isolation)
+    # instead of the default in-process handler.  Populated from the ``profile``
+    # field of a Telegram group_topics config entry.
+    auto_profile: Optional[str] = None
+
     # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
@@ -4037,8 +4043,40 @@ class BasePlatformAdapter(ABC):
         try:
             await self._run_processing_hook("on_processing_start", event)
 
-            # Call the handler (this can take a while with tool calls)
-            response = await self._message_handler(event)
+            # Profile-scoped messages (Telegram topic with a `profile` config field)
+            # run the agent in a customer-profile subprocess so HERMES_HOME is fully
+            # isolated.  The session_key is reused as task_id → gives per-topic
+            # session continuity inside the profile's own SessionDB.
+            _auto_profile = getattr(event, "auto_profile", None)
+            if _auto_profile:
+                logger.info(
+                    "[%s] Routing message to profile %r (session %s)",
+                    self.name, _auto_profile, session_key,
+                )
+                from hermes_cli.delegate_core import run_delegate_in_profile
+                loop = asyncio.get_event_loop()
+                _profile_result = await loop.run_in_executor(
+                    None,
+                    lambda: run_delegate_in_profile(
+                        session_key,
+                        event.text,
+                        _auto_profile,
+                        no_delegate_prompt=True,
+                    ),
+                )
+                if _profile_result.get("error"):
+                    logger.error(
+                        "[%s] Profile task error (profile=%r): %s",
+                        self.name, _auto_profile, _profile_result["error"],
+                    )
+                response = (
+                    _profile_result.get("final_response")
+                    or _profile_result.get("error")
+                    or ""
+                )
+            else:
+                # Call the handler (this can take a while with tool calls)
+                response = await self._message_handler(event)
             is_ephemeral_response = isinstance(response, EphemeralReply)
 
             # Slash-command handlers may return an EphemeralReply sentinel to

@@ -71,3 +71,52 @@ def test_unknown_profile_returns_error_not_raise():
         result = delegate_core.run_delegate_in_profile("task-1", "p", "ghost")
     assert result["final_response"] == ""
     assert "Invalid delegate profile" in result["error"]
+
+
+def test_no_delegate_prompt_sets_env_var(tmp_path):
+    """no_delegate_prompt=True must inject HERMES_DELEGATE_NO_PROMPT=1 into the subprocess env."""
+    profile_home = tmp_path / "profiles" / "grow-shop"
+    profile_home.mkdir(parents=True)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile(
+            "task-1", "do it", "grow-shop", no_delegate_prompt=True
+        )
+
+    assert captured["env"].get("HERMES_DELEGATE_NO_PROMPT") == "1"
+
+
+def test_delegate_prompt_absent_by_default(tmp_path):
+    """Without no_delegate_prompt the env var must NOT be set."""
+    profile_home = tmp_path / "profiles" / "grow-shop"
+    profile_home.mkdir(parents=True)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "grow-shop")
+
+    assert "HERMES_DELEGATE_NO_PROMPT" not in captured["env"]
+
+
+def test_auto_profile_field_on_message_event():
+    """MessageEvent must carry auto_profile=None by default and accept a profile name."""
+    from gateway.platforms.base import MessageEvent
+
+    ev = MessageEvent(text="hello")
+    assert ev.auto_profile is None
+
+    ev2 = MessageEvent(text="hello", auto_profile="grow-shop")
+    assert ev2.auto_profile == "grow-shop"

@@ -14,6 +14,7 @@ agent reads its config / session DB / memory from that environment variable.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
@@ -27,8 +28,14 @@ def main() -> int:
     task_id = sys.argv[1] if len(sys.argv) > 1 else ""
     prompt = sys.stdin.read()
 
+    # When spawned by the Telegram gateway path (no_delegate_prompt=True on the
+    # parent), skip the BigLobster-specific ephemeral prompt so the profile's
+    # own soul drives the session instead.
+    no_prompt = bool(os.environ.get("HERMES_DELEGATE_NO_PROMPT", ""))
+    system_prompt_kwarg = {"ephemeral_system_prompt": None} if no_prompt else {}
+
     try:
-        result = run_delegate_agent(task_id, prompt)
+        result = run_delegate_agent(task_id, prompt, **system_prompt_kwarg)
         out = {
             "final_response": result.get("final_response", ""),
             "error": result.get("error"),

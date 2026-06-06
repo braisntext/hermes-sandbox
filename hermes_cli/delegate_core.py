@@ -51,11 +51,18 @@ DELEGATE_SYSTEM_PROMPT = (
 )
 
 
-def run_delegate_agent(task_id: str, prompt: str) -> dict:
+def run_delegate_agent(
+    task_id: str,
+    prompt: str,
+    ephemeral_system_prompt: Optional[str] = DELEGATE_SYSTEM_PROMPT,
+) -> dict:
     """Synchronous agent runner.
 
     Reads config from the active ``HERMES_HOME``; running this under a profile's
     ``HERMES_HOME`` therefore scopes the session DB and memory to that profile.
+
+    Pass ``ephemeral_system_prompt=None`` to let the profile's own soul take over
+    (used by the Telegram gateway path, which needs the native profile persona).
     """
     from run_agent import AIAgent
     from hermes_cli.config import load_config
@@ -84,7 +91,7 @@ def run_delegate_agent(task_id: str, prompt: str) -> dict:
         "session_id": task_id or str(uuid.uuid4()),
         "model": default_model,
         "session_db": session_db,
-        "ephemeral_system_prompt": DELEGATE_SYSTEM_PROMPT,
+        "ephemeral_system_prompt": ephemeral_system_prompt,
     }
     try:
         runtime = resolve_runtime_provider(requested=config_provider)
@@ -105,12 +112,21 @@ def run_delegate_agent(task_id: str, prompt: str) -> dict:
     return agent.run_conversation(user_message=prompt, task_id=task_id)
 
 
-def run_delegate_in_profile(task_id: str, prompt: str, profile: str) -> dict:
+def run_delegate_in_profile(
+    task_id: str,
+    prompt: str,
+    profile: str,
+    *,
+    no_delegate_prompt: bool = False,
+) -> dict:
     """Run a delegated task inside *profile*'s ``HERMES_HOME``, in a subprocess.
 
     Returns the same ``{"final_response", "error"}`` shape as the agent so the
     caller's callback path is unchanged. Errors (unknown profile, timeout,
     subprocess failure) are returned as ``error`` rather than raised.
+
+    Pass ``no_delegate_prompt=True`` for the Telegram gateway path: the subprocess
+    will skip the ``DELEGATE_SYSTEM_PROMPT`` and use the profile's own soul instead.
     """
     from hermes_cli import profiles as profiles_mod
 
@@ -120,6 +136,8 @@ def run_delegate_in_profile(task_id: str, prompt: str, profile: str) -> dict:
         return {"final_response": "", "error": f"Invalid delegate profile {profile!r}: {exc}"}
 
     env = {**os.environ, "HERMES_HOME": profile_home}
+    if no_delegate_prompt:
+        env["HERMES_DELEGATE_NO_PROMPT"] = "1"
 
     # Scope the subprocess's working directory to the profile's own workspace.
     # Without this the subprocess inherits the web-server process's cwd (the
