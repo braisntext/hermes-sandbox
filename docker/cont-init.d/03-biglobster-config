@@ -40,24 +40,49 @@ from pathlib import Path
 home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
 
 # 1. Sync Zeabur process env → .env (override wins via load_dotenv(override=True)).
-env_path = home / ".env"
+#    The same keys are ALSO propagated into every profile's .env so a key
+#    rotation (which only updates the process env / main .env) doesn't leave
+#    per-profile gateways running on a stale, revoked key. This is the failure
+#    mode that broke the grow-shop profile after the 2026-06-05 secret rotation:
+#    the main .env got the new OPENROUTER_API_KEY but profiles/grow-shop/.env
+#    kept the old (revoked) one → 401 "User not found" on every grow-shop turn.
+#
+#    POLICY: the main .env is the single source of truth for these keys and we
+#    OVERWRITE the per-profile value. If you later want per-tenant billing with
+#    a DISTINCT OPENROUTER_API_KEY per profile, drop that key from `inject`
+#    (or special-case it) before deploying.
 inject = [
     "OPENROUTER_API_KEY", "HERMES_CALLBACK_SECRET", "HERMES_CALLBACK_URL",
     "HERMES_MAX_ITERATIONS", "EXA_API_KEY", "HUGGINGFACE_API_KEY",
     "GITHUB_TOKEN", "AUXILIARY_VISION_MODEL",
 ]
-content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-for var in inject:
-    val = os.environ.get(var, "")
-    if not val:
-        continue
-    if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
-        content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
-    else:
-        sep = "" if (not content or content.endswith("\n")) else "\n"
-        content += f"{sep}{var}={val}\n"
-env_path.write_text(content, encoding="utf-8")
-print(f"[03-biglobster] Synced env vars into {env_path}")
+
+def _sync_env_file(env_path):
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    for var in inject:
+        val = os.environ.get(var, "")
+        if not val:
+            continue
+        if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
+            content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+        else:
+            sep = "" if (not content or content.endswith("\n")) else "\n"
+            content += f"{sep}{var}={val}\n"
+    env_path.write_text(content, encoding="utf-8")
+
+# Main profile .env
+_sync_env_file(home / ".env")
+print(f"[03-biglobster] Synced env vars into {home / '.env'}")
+
+# Per-profile .env files — keeps tenant gateways on current keys after a
+# rotation. SOUL.md is the "real profile" marker (same as the s6 reconciler).
+profiles_root = home / "profiles"
+if profiles_root.is_dir():
+    for prof in sorted(p for p in profiles_root.iterdir() if p.is_dir()):
+        if not (prof / "SOUL.md").exists():
+            continue
+        _sync_env_file(prof / ".env")
+        print(f"[03-biglobster] Synced env vars into {prof / '.env'}")
 
 # 2. Re-assert runtime-critical config keys (idempotent). docker/config.yaml
 #    is the first-boot source of truth; here we only force the keys that must
