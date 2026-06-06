@@ -121,7 +121,7 @@ The Hermes gateway handles Telegram messages and BigLobster delegation. It start
    `015-supervise-perms` → `02-reconcile-profiles` (recreates per-profile gateway s6
    slots from the volume and **auto-starts any whose last `gateway_state.json` was
    `running`** — this is what restarts the gateway across restarts) →
-   `03-biglobster-config` (env sync, config key enforcement, MEMORY seed, egress check).
+   `03-biglobster-config` (env sync for main + all per-profile .env files, config key enforcement, MEMORY seed, per-profile template seeding from `docker/profiles/`, per-profile repo sync into `workspace/`, egress check).
 2. s6 then starts the supervised `dashboard` service (when `HERMES_DASHBOARD=1`) on port 9119
    and the (no-op) `main-hermes` slot; the container's `CMD` (`sleep infinity`) runs as the
    s6 "main program" so the container stays alive while the dashboard + gateways serve.
@@ -144,6 +144,8 @@ The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent v
 
 > ⚠️ `/workspace/` does **not** exist at the container root. All paths must be under `/opt/data/`.
 
+**Main agent workspace** (manually cloned, used by the default/main profile):
+
 | Container path | Purpose |
 |----------------|---------|
 | `/opt/data/workspace/FinView` | FinView repo working directory |
@@ -153,6 +155,15 @@ The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent v
 | `/opt/data/workspace/biglobster` | BigLobster repo working directory |
 | `/opt/data/biglobster/` | BigLobster output files (images, reports, exports) |
 | `/opt/data/cache/images/` | Auto-saved images from `image_generate` tool |
+
+**Per-profile workspaces** (auto-managed by `03-biglobster-config` section 6 at every boot):
+
+| Container path | Repo | When |
+|----------------|------|------|
+| `/opt/data/profiles/grow-shop/workspace/grow-shop-api` | `braisntext/grow-shop-api` | cloned on first boot, pulled on subsequent boots |
+| `/opt/data/profiles/grow-shop/workspace/grow-shop-landing` | `braisntext/grow-shop-landing` | cloned on first boot, pulled on subsequent boots |
+
+To add repos for a new profile: create `docker/profiles/<name>/repos.txt` (one `owner/repo` per line) and rebuild the image.
 
 ---
 
@@ -238,7 +249,11 @@ since the 2026-06 upgrade — the old `[entrypoint] …` lines are gone):
 
 ```
 [03-biglobster] Synced env vars into /opt/data/.env
+[03-biglobster] Synced env vars into /opt/data/profiles/grow-shop/.env
 [03-biglobster] config.yaml keys already current   (or "Reconciled config.yaml keys")
+[03-biglobster] Seeded profiles/grow-shop/repos.txt   (first boot after image update only)
+[03-biglobster] Pulling braisntext/grow-shop-api      (or "Cloning …" on first boot)
+[03-biglobster] Pulling braisntext/grow-shop-landing
 [03-biglobster] Egress openrouter.ai: 200
 [03-biglobster] Egress router.huggingface.co: 200   (or FAIL if Zeabur blocks it)
 [startup] Model: openrouter/owl-alpha | Provider: openrouter | API key present: True

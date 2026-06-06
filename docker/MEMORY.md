@@ -9,3 +9,5 @@ ping is not available in this container. Use curl for connectivity checks: curl 
 vision tool: AUXILIARY_VISION_MODEL env var sets the vision model. owl-alpha does not support image input — if vision fails with 404, the tool auto-retries with the default backend (google/gemini-3-flash-preview via OpenRouter). Check AUXILIARY_VISION_MODEL value before debugging vision failures.
 §
 Memory limit is 6000 chars. When near-full, compact entries: merge related facts, drop stale context. Never let memory fill to capacity — future writes will be silently rejected.
+§
+Per-profile repo sync: each profile that has a repos.txt gets its declared GitHub repos cloned (depth 1) into profiles/<name>/workspace/ at every boot (git pull --ff-only on subsequent boots). grow-shop profile has workspace/grow-shop-api/ and workspace/grow-shop-landing/ auto-managed. To add repos for a new profile, create docker/profiles/<name>/repos.txt in the image and rebuild.
