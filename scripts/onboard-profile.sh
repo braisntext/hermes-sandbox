@@ -21,7 +21,12 @@ PROFILES_ROOT="$HERMES_HOME/profiles"
 # ── helpers ────────────────────────────────────────────────────────────────
 
 as_hermes() {
-    if [ "$(id -u)" = 0 ]; then s6-setuidgid hermes "$@"; else "$@"; fi
+    if [ "$(id -u)" != 0 ]; then "$@"; return; fi
+    if [ -x /command/s6-setuidgid ]; then
+        /command/s6-setuidgid hermes "$@"
+    else
+        "$@"  # fallback: run as root (acceptable for onboarding)
+    fi
 }
 
 # Prompts go to stderr so they are visible even inside $() captures.
