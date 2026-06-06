@@ -134,6 +134,22 @@ else
     echo "      ✓ dirs created"
 fi
 
+# Copy provider/model settings from main config so the profile works
+# immediately without a manual setup step.
+as_hermes "$PY" - <<PYEOF
+import yaml
+from pathlib import Path
+main_cfg = yaml.safe_load(open("$HERMES_HOME/config.yaml")) or {}
+prof_cfg_path = Path("$PROFILE_DIR") / "config.yaml"
+cfg = yaml.safe_load(prof_cfg_path.read_text()) if prof_cfg_path.exists() else {}
+cfg = cfg or {}
+for k in ("model", "web", "image_gen", "video_gen", "memory"):
+    if k in main_cfg:
+        cfg[k] = main_cfg[k]
+prof_cfg_path.write_text(yaml.dump(cfg, default_flow_style=False))
+print("      ✓ provider/model config copied from main")
+PYEOF
+
 # ── 3. git credentials scoped to profile home ─────────────────────────────
 
 echo "[2/6] Setting up git credentials..."

@@ -92,8 +92,11 @@ if profiles_root.is_dir():
 # 2. Re-assert runtime-critical config keys (idempotent). docker/config.yaml
 #    is the first-boot source of truth; here we only force the keys that must
 #    track the intended deploy even on volumes seeded before a change.
+#    Applied to BOTH the main config.yaml and every per-profile config.yaml so
+#    new profiles created via `hermes profile create` get working provider
+#    settings immediately without requiring a manual setup step.
 import yaml
-config_path = home / "config.yaml"
+
 overrides = {
     ("web", "backend"): "exa",
     ("image_gen", "provider"): "openrouter",
@@ -102,7 +105,11 @@ overrides = {
     ("memory", "user_char_limit"): 3000,
 }
 default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
-if config_path.exists():
+
+def _reconcile_config(config_path, label):
+    if not config_path.exists():
+        print(f"[03-biglobster] {label}: config.yaml not present yet — skipping")
+        return
     try:
         cfg = yaml.safe_load(config_path.read_text()) or {}
         changed = False
@@ -140,13 +147,22 @@ if config_path.exists():
                 changed = True
         if changed:
             config_path.write_text(yaml.dump(cfg, default_flow_style=False))
-            print("[03-biglobster] Reconciled config.yaml keys")
+            print(f"[03-biglobster] {label}: reconciled config.yaml keys")
         else:
-            print("[03-biglobster] config.yaml keys already current")
+            print(f"[03-biglobster] {label}: config.yaml keys already current")
     except Exception as e:
-        print(f"[03-biglobster] Warning: config.yaml reconcile failed: {e}")
-else:
-    print("[03-biglobster] config.yaml not present yet — skipping key reconcile")
+        print(f"[03-biglobster] Warning: {label} config.yaml reconcile failed: {e}")
+
+# Main profile
+_reconcile_config(home / "config.yaml", "main")
+
+# Per-profile configs — same overrides so every profile gets a working
+# model/provider out of the box. SOUL.md is the real-profile marker.
+if profiles_root.is_dir():
+    for prof in sorted(p for p in profiles_root.iterdir() if p.is_dir()):
+        if not (prof / "SOUL.md").exists():
+            continue
+        _reconcile_config(prof / "config.yaml", prof.name)
 PYEOF
 
 # --- 3: seed agent memory on first boot ---
