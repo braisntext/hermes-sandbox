@@ -86,6 +86,19 @@ _log = logging.getLogger(__name__)
 
 app = FastAPI(title="Hermes Agent", version=__version__)
 
+# Vite builds with content-hashed filenames (index-BcgXqjdx.js) so assets at
+# /assets/* are immutable — the URL itself changes when content changes. Tell
+# browsers and proxies they can cache forever and never revalidate.
+_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+
+
+class _CachedStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        if getattr(response, "status_code", None) == 200:
+            response.headers["Cache-Control"] = _IMMUTABLE_CACHE
+        return response
+
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
 # The desktop shell mints the token and injects it via
@@ -6703,9 +6716,10 @@ def mount_spa(application: FastAPI):
                 css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
                 css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
                 css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
-        return Response(content=css, media_type="text/css")
+        return Response(content=css, media_type="text/css",
+                        headers={"Cache-Control": _IMMUTABLE_CACHE})
 
-    application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+    application.mount("/assets", _CachedStaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
