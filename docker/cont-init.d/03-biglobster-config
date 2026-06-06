@@ -11,14 +11,19 @@
 #
 # Replaces the env-patching block that used to live in the pre-s6
 # docker/entrypoint.sh (now a deprecated upstream shim). On every boot:
-#   1. Sync Zeabur-injected process env vars into $HERMES_HOME/.env
-#      (env_loader uses load_dotenv(override=True), so .env must win).
+#   1. Sync Zeabur-injected process env vars into $HERMES_HOME/.env and all
+#      per-profile .env files (env_loader uses load_dotenv(override=True),
+#      so .env must win; per-profile sync prevents stale revoked keys after
+#      a secret rotation).
 #   2. Re-assert the fork's runtime-critical config.yaml keys (idempotent)
 #      so volumes seeded before a config change still get the intended
 #      provider / model / memory settings. docker/config.yaml remains the
 #      first-boot source of truth (seeded by stage2-hook.sh).
 #   3. Seed memories/MEMORY.md on first boot from docker/MEMORY.md.
-#   4. Log egress reachability for OpenRouter / HuggingFace.
+#   4. Wire GITHUB_TOKEN into git credential store (refreshed every boot).
+#   5. Seed per-profile bootstrap files from docker/profiles/<name>/ (once).
+#   6. Clone / pull per-profile repos declared in repos.txt → workspace/.
+#   7. Log egress reachability for OpenRouter / HuggingFace.
 #
 # Never fatal: a non-zero exit from a cont-init script aborts container
 # boot, so every step is guarded and the script always exits 0.
@@ -40,24 +45,49 @@ from pathlib import Path
 home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
 
 # 1. Sync Zeabur process env → .env (override wins via load_dotenv(override=True)).
-env_path = home / ".env"
+#    The same keys are ALSO propagated into every profile's .env so a key
+#    rotation (which only updates the process env / main .env) doesn't leave
+#    per-profile gateways running on a stale, revoked key. This is the failure
+#    mode that broke the grow-shop profile after the 2026-06-05 secret rotation:
+#    the main .env got the new OPENROUTER_API_KEY but profiles/grow-shop/.env
+#    kept the old (revoked) one → 401 "User not found" on every grow-shop turn.
+#
+#    POLICY: the main .env is the single source of truth for these keys and we
+#    OVERWRITE the per-profile value. If you later want per-tenant billing with
+#    a DISTINCT OPENROUTER_API_KEY per profile, drop that key from `inject`
+#    (or special-case it) before deploying.
 inject = [
     "OPENROUTER_API_KEY", "HERMES_CALLBACK_SECRET", "HERMES_CALLBACK_URL",
     "HERMES_MAX_ITERATIONS", "EXA_API_KEY", "HUGGINGFACE_API_KEY",
     "GITHUB_TOKEN", "AUXILIARY_VISION_MODEL",
 ]
-content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-for var in inject:
-    val = os.environ.get(var, "")
-    if not val:
-        continue
-    if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
-        content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
-    else:
-        sep = "" if (not content or content.endswith("\n")) else "\n"
-        content += f"{sep}{var}={val}\n"
-env_path.write_text(content, encoding="utf-8")
-print(f"[03-biglobster] Synced env vars into {env_path}")
+
+def _sync_env_file(env_path):
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    for var in inject:
+        val = os.environ.get(var, "")
+        if not val:
+            continue
+        if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
+            content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+        else:
+            sep = "" if (not content or content.endswith("\n")) else "\n"
+            content += f"{sep}{var}={val}\n"
+    env_path.write_text(content, encoding="utf-8")
+
+# Main profile .env
+_sync_env_file(home / ".env")
+print(f"[03-biglobster] Synced env vars into {home / '.env'}")
+
+# Per-profile .env files — keeps tenant gateways on current keys after a
+# rotation. SOUL.md is the "real profile" marker (same as the s6 reconciler).
+profiles_root = home / "profiles"
+if profiles_root.is_dir():
+    for prof in sorted(p for p in profiles_root.iterdir() if p.is_dir()):
+        if not (prof / "SOUL.md").exists():
+            continue
+        _sync_env_file(prof / ".env")
+        print(f"[03-biglobster] Synced env vars into {prof / '.env'}")
 
 # 2. Re-assert runtime-critical config keys (idempotent). docker/config.yaml
 #    is the first-boot source of truth; here we only force the keys that must
@@ -141,7 +171,70 @@ else
     echo "[03-biglobster] GITHUB_TOKEN not set — git HTTPS credential skipped"
 fi
 
-# --- 5: egress diagnostics (non-fatal) ---
+# --- 5: seed per-profile bootstrap files from docker/profiles/<name>/ (once) ---
+# Files bundled in the image under docker/profiles/<name>/ are copied into the
+# corresponding volume profile directory on first use (i.e. only if the
+# destination file does not already exist). This lets the image ship per-profile
+# defaults (repos.txt, etc.) without overwriting files the agent has written.
+# Guard: profile must already exist on the volume (marker: SOUL.md present).
+if [ -d "$INSTALL_DIR/docker/profiles" ]; then
+    for src_dir in "$INSTALL_DIR/docker/profiles"/*/; do
+        [ -d "$src_dir" ] || continue
+        prof_name=$(basename "$src_dir")
+        prof_vol="$HERMES_HOME/profiles/$prof_name"
+        [ -f "$prof_vol/SOUL.md" ] || continue
+        for src_file in "$src_dir"*; do
+            [ -f "$src_file" ] || continue
+            fname=$(basename "$src_file")
+            dest="$prof_vol/$fname"
+            if [ ! -f "$dest" ]; then
+                as_hermes cp "$src_file" "$dest" \
+                    && echo "[03-biglobster] Seeded profiles/$prof_name/$fname"
+            fi
+        done
+    done
+fi
+
+# --- 6: per-profile repo sync (clone on first boot, pull on subsequent boots) ---
+# Any profile with a repos.txt gets its listed GitHub repos cloned into
+# <profile>/workspace/<repo-name>/. Format: one "owner/repo" per line;
+# blank lines and lines starting with # are ignored.
+# git HTTPS credentials are already configured by section 4.
+# Non-fatal: a clone/pull failure prints a warning and boot continues.
+if [ -d "$HERMES_HOME/profiles" ]; then
+    for prof_dir in "$HERMES_HOME/profiles"/*/; do
+        repos_file="${prof_dir}repos.txt"
+        [ -f "$repos_file" ] || continue
+        workspace="${prof_dir}workspace"
+        as_hermes mkdir -p "$workspace"
+        while IFS= read -r repo || [ -n "$repo" ]; do
+            case "$repo" in ''|'#'*) continue ;; esac
+            repo_name="${repo##*/}"
+            target="$workspace/$repo_name"
+            if [ -d "$target/.git" ]; then
+                echo "[03-biglobster] Pulling $repo"
+                HOME="$HERMES_HOME" as_hermes git -C "$target" pull --ff-only --quiet 2>&1 \
+                    || echo "[03-biglobster] Warning: git pull failed for $repo (non-fatal)"
+            else
+                echo "[03-biglobster] Cloning $repo (depth 1)"
+                HOME="$HERMES_HOME" as_hermes git clone --depth=1 \
+                    "https://github.com/$repo.git" "$target" 2>&1 \
+                    || echo "[03-biglobster] Warning: git clone failed for $repo (non-fatal)"
+            fi
+        done < "$repos_file"
+        # One-time: append a workspace note to the profile's MEMORY.md so the
+        # agent knows to look in workspace/ for project source code.
+        mem_file="${prof_dir}memories/MEMORY.md"
+        if [ -f "$mem_file" ] && ! grep -q "workspace/" "$mem_file" 2>/dev/null; then
+            prof_name=$(basename "$prof_dir")
+            printf '\n§\nProject repos are cloned into workspace/ at every container boot (e.g. workspace/grow-shop-api/). Run `ls workspace/` to see what is available. Use file tools to read source code, configs, and docs from there.\n' \
+                | as_hermes tee -a "$mem_file" > /dev/null \
+                && echo "[03-biglobster] Appended workspace note to profiles/$prof_name/memories/MEMORY.md"
+        fi
+    done
+fi
+
+# --- 7: egress diagnostics (non-fatal) ---
 echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
 # Probe the real router endpoint (/v1/models returns 200 without auth); the
 # bare root 404s by design, which made the old check a false negative.
