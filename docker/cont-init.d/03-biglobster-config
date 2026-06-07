@@ -36,6 +36,29 @@ export HERMES_HOME
 # Drop to hermes (matching stage2-hook.sh) so files land hermes-owned.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
 
+# --- 0: restore missing SOUL.md files from bundled templates ---
+# SOUL.md is both the agent's personality file AND the real-profile marker used
+# by steps 1, 2, and 5 below. If an agent or user accidentally deletes it the
+# profile becomes invisible to all downstream logic and the agent falls back to
+# the default (BigLobster) context. Restoring it here, before any marker checks,
+# breaks the circular dependency.
+#
+# Source: $INSTALL_DIR/docker/profiles/<name>/SOUL.md (baked into the image).
+# Policy: ALWAYS restore when missing (not "seed once") — the image copy is the
+# canonical version. This also means the panel can still edit SOUL.md freely;
+# edits persist on the volume and are never overwritten while the file exists.
+if [ -d "$INSTALL_DIR/docker/profiles" ]; then
+    for src_soul in "$INSTALL_DIR/docker/profiles"/*/SOUL.md; do
+        [ -f "$src_soul" ] || continue
+        prof_name=$(basename "$(dirname "$src_soul")")
+        dest_soul="$HERMES_HOME/profiles/$prof_name/SOUL.md"
+        if [ ! -f "$dest_soul" ] && [ -d "$HERMES_HOME/profiles/$prof_name" ]; then
+            as_hermes cp "$src_soul" "$dest_soul" \
+                && echo "[03-biglobster] Restored missing SOUL.md for profile: $prof_name"
+        fi
+    done
+fi
+
 # --- 1 + 2: env sync + config key enforcement (run as hermes via the venv
 # python, which has PyYAML; bare python3 may not). ---
 as_hermes "$PY" - <<'PYEOF' || echo "[03-biglobster] Warning: config reconcile failed; continuing"
