@@ -33,6 +33,21 @@ INSTALL_DIR="/opt/hermes"
 PY="$INSTALL_DIR/.venv/bin/python"
 export HERMES_HOME
 
+# Harden every git operation below (sections 4 & 6) so a network or
+# credential stall can never hang container boot. cont-init runs BEFORE
+# s6 starts the dashboard/gateway services, so an unbounded git clone/pull
+# here blocks the whole boot and takes the panel down with it.
+#   - GIT_TERMINAL_PROMPT=0: never block on stdin asking for credentials;
+#     a bad/expired token fails fast instead of hanging forever.
+#   - GIT_HTTP_LOW_SPEED_*: abort a transfer that stalls below 1 KB/s for
+#     30s (catches a half-open connection well before the hard timeout).
+# The clone/pull calls in section 6 are additionally wrapped in `timeout`
+# as a hard ceiling. All of this preserves the script's never-fatal
+# contract: a timed-out git just prints a warning and boot continues.
+export GIT_TERMINAL_PROMPT=0
+export GIT_HTTP_LOW_SPEED_LIMIT=1000
+export GIT_HTTP_LOW_SPEED_TIME=30
+
 # Drop to hermes (matching stage2-hook.sh) so files land hermes-owned.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
 
@@ -252,13 +267,13 @@ if [ -d "$HERMES_HOME/profiles" ]; then
             target="$workspace/$repo_name"
             if [ -d "$target/.git" ]; then
                 echo "[03-biglobster] Pulling $repo"
-                HOME="$HERMES_HOME" as_hermes git -C "$target" pull --ff-only --quiet 2>&1 \
-                    || echo "[03-biglobster] Warning: git pull failed for $repo (non-fatal)"
+                HOME="$HERMES_HOME" as_hermes timeout 120 git -C "$target" pull --ff-only --quiet 2>&1 \
+                    || echo "[03-biglobster] Warning: git pull failed/timed out for $repo (non-fatal)"
             else
                 echo "[03-biglobster] Cloning $repo (depth 1)"
-                HOME="$HERMES_HOME" as_hermes git clone --depth=1 \
+                HOME="$HERMES_HOME" as_hermes timeout 300 git clone --depth=1 \
                     "https://github.com/$repo.git" "$target" 2>&1 \
-                    || echo "[03-biglobster] Warning: git clone failed for $repo (non-fatal)"
+                    || echo "[03-biglobster] Warning: git clone failed/timed out for $repo (non-fatal)"
             fi
         done < "$repos_file"
         # One-time: append a workspace note to the profile's MEMORY.md so the
