@@ -1,0 +1,9 @@
+name: crm
+version: 1.0.0
+description: "Native CRM — contacts with light status (lead/active/customer/archived) and free-form tags, plus per-contact conversation history resolved from the gateway sessions. Adds a /crm dashboard tab and 3 agent tools (find/create/update contacts). Per-profile store at <HERMES_HOME>/crm.db."
+author: NousResearch
+kind: standalone
+provides_tools:
+  - crm_find_contact
+  - crm_create_contact
+  - crm_update_contact
