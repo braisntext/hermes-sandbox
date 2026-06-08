@@ -1,0 +1,14 @@
+{
+  "name": "crm",
+  "label": "CRM",
+  "description": "Contacts with status and tags, plus per-contact conversation history resolved from gateway sessions.",
+  "icon": "Users",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/crm",
+    "position": "after:sessions"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
