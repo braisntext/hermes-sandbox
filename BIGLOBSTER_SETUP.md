@@ -280,6 +280,49 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 
 ## Incident log
 
+### 2026-06-08 — Cron jobs delivering to the old DM after the profiles migration
+
+Pre-migration BigLobster cron jobs (Content Gap Hunter, SEO Health Check, Repo Backup,
+Weekly Audit) kept posting to the old private DM (`telegram chat 178351069`) instead of the
+new forum group, and PRs were failing. Root causes, in order of discovery:
+
+1. **Outbound home channel never repointed.** The migration added inbound
+   `telegram.extra.group_topics` routing but left `TELEGRAM_HOME_CHANNEL` in `/opt/data/.env`
+   pointing at the old DM. Fixed: `TELEGRAM_HOME_CHANNEL=-1004224848555` +
+   `TELEGRAM_HOME_CHANNEL_THREAD_ID=2` (BigLobster HQ topic).
+2. **Frozen cron `origin`.** Jobs store the chat/thread captured at create time; with
+   `deliver=origin` (or even `deliver=telegram`, since the scheduler returns a telegram
+   `origin` before consulting the home channel) they ignore config. Fixed: set
+   `deliver=telegram` + `origin=null` on the affected jobs so routing resolves at fire time.
+3. **Dead hardcoded PAT.** A fine-grained GitHub PAT was pasted in plaintext in the Content
+   Gap Hunter prompt; it was revoked in the 2026-06-05 secret rotation → every PR 401'd.
+   Fixed: scrubbed the token, switched to a git credential helper backed by env
+   `$GITHUB_TOKEN` in the `hermes` user's `~/.gitconfig` (`/opt/data/home/.gitconfig`).
+
+**Two lessons worth not repeating:**
+
+- **Run cron + `.env` edits as the `hermes` user, never root.** The gateway runs as `hermes`.
+  Editing `/opt/data/cron/jobs.json` or `.env` as root (via `python3`, `sed -i`, or
+  `hermes cron run/tick`) replaces the file with a **root-owned 0600** file. The gateway then
+  can't read/write it and the **cron scheduler silently fires nothing** (tick errors are
+  debug-level; `Cron ticker started` still logs, masking it). `hermes cron status` run as root
+  still looks healthy. Recovery: `chown hermes:hermes /opt/data/.env && chown -R hermes:hermes
+  /opt/data/cron`, then restart the gateway. Always wrap cron CLI/file edits in
+  `su hermes -c '...'`. Verify auto-fire (not foreground `cron tick`): `su hermes -c 'hermes
+  cron run <id>'`, wait 80s, confirm `last_run_at` advanced **and** `jobs.json` is still
+  `hermes`-owned. Gateway Python logs are in `/opt/data/logs/gateway.log` (the s6
+  `gateways/default/current` only holds the startup banner).
+- **When migrating the Telegram bot/forum, repoint `TELEGRAM_HOME_CHANNEL`
+  (+ `_THREAD_ID`) — not just `group_topics`.** `group_topics` is inbound-only; the home
+  channel drives all outbound (cron + proactive delegate callbacks/alerts).
+
+Also surfaced/fixed: the live gateway was an unsupervised orphan from a manual `gateway
+restart` (s6 `gateway-default` was stuck `down`, "already running"); killed it so s6 took
+over. The recycle-autostart fragility (graceful shutdown → `draining` → no autostart) is
+tracked separately. The Repo Backup job had its bash pasted into the `script` field (which
+expects a filename under `/opt/data/scripts/`) → "Script not found" every run; fixed by
+writing `scripts/backup-repo.sh` and setting `script: backup-repo.sh`.
+
 ### 2026-06-02 — Upstream upgrade (v0.13.0 → v2026.5.29.x) + tini→s6-overlay
 
 Merged ~1,980 upstream commits (`hermes-upstream-upgrade` branch) and folded in the
