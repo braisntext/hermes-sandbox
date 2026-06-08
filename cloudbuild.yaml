@@ -1,0 +1,22 @@
+steps:
+  # Paso 1: Iniciar sesión en GitHub Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "$_GITHUB_TOKEN" | docker login ghcr.io -u braisntext --password-stdin
+
+  # Paso 2: Compilar la imagen (¡CON BUILDKIT ACTIVO!)
+  - name: 'gcr.io/cloud-builders/docker'
+    env:
+      - 'DOCKER_BUILDKIT=1' # <--- ESTO ACTIVA EL MOTOR MODERNO
+    args: [
+      'build',
+      '-t', 'ghcr.io/braisntext/hermes-sandbox:latest',
+      '.'
+    ]
+
+  # Paso 3: Hacer el push a GitHub
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'ghcr.io/braisntext/hermes-sandbox:latest']

@@ -1,0 +1,29 @@
+# Files NOT uploaded to Cloud Build (the `gcloud builds submit` tarball).
+# Local build tooling, kept untracked alongside cloudbuild.yaml.
+
+# Version control
+.git
+.gitignore
+
+# Local agent / worktree state — the big one: .claude/worktrees holds full
+# repo checkouts plus their own .venv (was ~513 MB, the bulk of the upload).
+.claude/
+.worktrees/
+
+# Python / Node dev environments (the image installs its own)
+.venv/
+venv/
+node_modules/
+
+# Caches & bytecode
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+
+# Runtime data (bind-mounted at /opt/data at runtime; never part of the build)
+data/
+logs/
+
+# OS cruft
+.DS_Store
