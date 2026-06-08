@@ -46,6 +46,13 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
     "cleanup_progress": False,
+    # When true, send an immediate acknowledgment the instant a fresh turn
+    # starts on an idle session, so the user has signal before the typing
+    # indicator / first heartbeat. On by default for interactive chat
+    # platforms; non-interactive tiers (email/sms/webhook/api) opt out below.
+    # The text is configurable per profile via display.turn_start_ack_text.
+    "turn_start_ack": True,
+    "turn_start_ack_text": "✅ Mensaje recibido, te escribo cuando tenga novedades.",
 }
 
 # ---------------------------------------------------------------------------
@@ -94,6 +101,9 @@ _TIER_MINIMAL = {
     "interim_assistant_messages": False,
     "long_running_notifications": False,
     "busy_ack_detail": False,
+    # Batch / non-interactive delivery: an extra "message received" bubble
+    # makes no sense for email/sms/webhook/home-assistant.
+    "turn_start_ack": False,
 }
 
 _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -134,7 +144,7 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "sms":             _TIER_MINIMAL,
     "webhook":         _TIER_MINIMAL,
     "homeassistant":   _TIER_MINIMAL,
-    "api_server":      {**_TIER_HIGH, "tool_preview_length": 0},
+    "api_server":      {**_TIER_HIGH, "tool_preview_length": 0, "turn_start_ack": False},
 }
 
 # Canonical set of per-platform overrideable keys (for validation).
@@ -224,6 +234,7 @@ def _normalise(setting: str, value: Any) -> Any:
         "interim_assistant_messages",
         "long_running_notifications",
         "busy_ack_detail",
+        "turn_start_ack",
     }:
         if isinstance(value, str):
             return value.lower() in {"true", "1", "yes", "on"}

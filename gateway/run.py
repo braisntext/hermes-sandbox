@@ -7204,6 +7204,62 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    async def _maybe_send_turn_start_ack(self, event: "MessageEvent", source) -> None:
+        """Send a one-shot "message received" acknowledgment when a fresh turn
+        starts on an idle session.
+
+        Fills the silence between turn start and the first long-running
+        heartbeat (180s by default): the typing indicator alone is easy to
+        miss in a threaded mobile inbox, so without this the user just stares
+        at a quiet thread. Fires once per fresh turn — the session-claim
+        sentinel in ``_handle_message`` guarantees rapid follow-ups take the
+        busy-ack path instead, so there's no double-ack.
+
+        Skipped for internal/system events and standing-goal continuations so
+        autonomous turns never spam the chat. Best-effort: any failure is
+        swallowed and never blocks message handling. Text + on/off are
+        resolved per platform/profile via display.turn_start_ack[_text].
+        """
+        try:
+            if getattr(event, "internal", False):
+                return
+            if self._is_standing_goal_continuation(event):
+                return
+            from gateway.display_config import resolve_display_setting
+            platform_key = _platform_config_key(source.platform)
+            cfg = _load_gateway_config()
+            if not bool(
+                resolve_display_setting(cfg, platform_key, "turn_start_ack", True)
+            ):
+                return
+            text = resolve_display_setting(cfg, platform_key, "turn_start_ack_text", "")
+            text = str(text).strip() if text else ""
+            if not text:
+                return
+            adapter = self.adapters.get(source.platform)
+            if not adapter:
+                return
+            reply_anchor = self._reply_anchor_for_event(event)
+            thread_meta = self._thread_metadata_for_source(source, reply_anchor)
+            await adapter._send_with_retry(
+                chat_id=source.chat_id,
+                content=text,
+                reply_to=(
+                    reply_anchor
+                    if source.platform == Platform.TELEGRAM
+                    and source.chat_type == "dm"
+                    and source.thread_id
+                    else (
+                        None
+                        if source.platform == Platform.TELEGRAM and source.thread_id
+                        else event.message_id
+                    )
+                ),
+                metadata=thread_meta,
+            )
+        except Exception as e:
+            logger.debug("Failed to send turn-start ack: %s", e)
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -8323,6 +8379,13 @@ class GatewayRunner:
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
         _run_generation = self._begin_session_run_generation(_quick_key)
+
+        # Immediate "message received" ack for this fresh turn. Fire-and-forget
+        # so it never delays the agent start; the helper self-skips internal /
+        # goal-continuation events and is a no-op when turn_start_ack is off.
+        # Held in a local (alive for the whole turn) so the task isn't GC'd
+        # mid-send.
+        _ack_task = asyncio.create_task(self._maybe_send_turn_start_ack(event, source))
 
         try:
             _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
