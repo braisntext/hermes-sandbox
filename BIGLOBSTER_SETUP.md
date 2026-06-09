@@ -60,6 +60,37 @@ For model changes or env var updates, use Zeabur Variables instead:
 - `HERMES_DEFAULT_MODEL` — overrides model in config.yaml on every boot
 - Takes effect on next Zeabur restart (no image rebuild needed)
 
+### Three different "restarts" — don't confuse them
+
+(Cost a long debugging session on 2026-06-09.)
+
+- **Zeabur "Restart"** recreates the container but re-pulls the **same `:latest`** image. It brings **no new code** unless you ran a Cloud Build first. Restarting after a code change without building = nothing changes.
+- **A full container restart re-runs the cont-init hooks** (`01-hermes-setup`, `03-biglobster-config`, …) before the dashboard/gateway start.
+- **"Restart Gateway" in the web panel** only restarts the `main-hermes` s6 service — it does **not** re-run cont-init. So **`config.yaml` edits + a panel gateway-restart are safe and fast**; use that for model/config changes, not a container restart.
+
+### Boot-hang risk in cont-init (fixed in #18)
+
+`03-biglobster-config` clones/pulls each profile's `repos.txt` on every container boot. Before #18 those git calls had no timeout and no `GIT_TERMINAL_PROMPT`, so a network stall or an expired token **hung the entire boot** — cont-init blocks before the dashboard starts, so the panel never comes up. #18 wrapped them in `timeout` + `GIT_TERMINAL_PROMPT=0` + `GIT_HTTP_LOW_SPEED_*`. Symptom of the bug: boot log stalls right after `[03-biglobster] Synced env vars…` with no following `exited 0`. Make sure the running image includes #18 (rebuild after merging it — the running image only has it once rebuilt).
+
+---
+
+## Troubleshooting: panel slow / "not loading"
+
+Observed 2026-06-09 and root-caused to **model latency, not infrastructure**. Triage in order:
+
+1. **Edge health (no auth):** `curl -sS -o /dev/null -w "%{http_code} %{time_total}s\n" https://blhermes.zeabur.app/api/dashboard/plugins`. Fast 200 ⇒ backend is alive; the problem is downstream (authenticated endpoints or the browser).
+2. **Browser cache:** a stale cached app bundle shows old nav while plugins still appear (plugins load at runtime, so they're not a reliable tell). Hard-refresh / incognito. Confirm the loaded bundle in DevTools console: `[...document.scripts].map(s=>s.src).filter(s=>s.includes('/assets/index-'))`.
+3. **Metrics (Zeabur → Metrics):** **CPU ~0% + RAM not maxed** while data pages hang ⇒ the backend is *waiting*, not working — it is **not** resource pressure.
+4. **Volume:** in the container, `time dd if=/opt/data/state.db of=/dev/null bs=4M` and `cat /proc/loadavg`. Fast read + low load ⇒ the volume is fine (don't blame infra).
+5. **The real cause (this incident):** a slow model. `owl-alpha` ran **7–25 s per call**; after a gateway restart the gateway drains a cron/telegram backlog, each turn blocking on slow LLM calls (network wait → 0% CPU), and `/api/status` (a synchronous DB query on the async event loop) queues behind it → panel hangs ~20 min then self-recovers. **Fix: switch to a fast model** (e.g. `deepseek/deepseek-v4-flash`). Note the `auxiliary.*` models (`title_generation`, `compression`, `skills_hub`, `session_search`, `curator`, …) are configured **separately** and must be switched too.
+6. **Catch it live:** `pip install py-spy && py-spy dump --pid <dashboard_pid>` during a hang shows the exact stuck line.
+
+`dashboard.show_token_analytics` (default **off**) gates the **Analytics** tab and the **Models** cost/token breakdown — set it `true` if those look "missing" from the panel.
+
+## Cron prompt security guard
+
+Cron prompts are scanned (`tools/cronjob_tools.py`). A `curl`/`wget` combined with a secret variable (`$…KEY/TOKEN/SECRET/API…`) in the URL, in `--data`, or in an `Authorization` header is **blocked** (`exfil_curl_*` patterns) and the job won't run. To hit GitHub or any API from a cron job, use the **native tools** — `gh pr create`, the github skills, `web`/exa — since git and `gh` are already authenticated in the container. Never hand-roll a `curl` with a token in a cron prompt.
+
 ---
 
 ## Zeabur environment variables (Hermes service)
