@@ -88,6 +88,24 @@ RUN set -eu; \
 # Install xurl (X Developer Platform CLI)
 RUN curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
 
+# Install GitHub CLI (gh) — lets cron jobs / agents open PRs (e.g. the blog
+# "Content Gap Hunter") with `gh pr create` instead of a hand-rolled
+# `curl -H "Authorization: …"`, which the cron security guard blocks. Single
+# static binary from the upstream release tarball (same curl pattern as
+# s6-overlay/xurl above) — no third-party apt repo and nothing to clean up.
+# Resolves the latest release, falling back to a pinned version if the GitHub
+# API is unreachable/rate-limited at build time. Auth uses the GITHUB_TOKEN
+# already wired into the git credential store at boot (gh reads GH_TOKEN /
+# GITHUB_TOKEN from the environment).
+ARG GH_CLI_FALLBACK_VERSION=2.62.0
+RUN ARCH="$(dpkg --print-architecture)" && \
+    GH_VER="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+' || true)" && \
+    GH_VER="${GH_VER:-${GH_CLI_FALLBACK_VERSION}}" && \
+    echo "Installing gh ${GH_VER} for ${ARCH}" && \
+    curl -fsSL --retry 3 "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_${ARCH}.tar.gz" \
+      | tar -xz -f - -C /usr/local/bin --strip-components=2 "gh_${GH_VER}_linux_${ARCH}/bin/gh" && \
+    gh --version
+
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
 
