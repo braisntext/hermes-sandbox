@@ -203,6 +203,43 @@ if profiles_root.is_dir():
         _reconcile_config(prof / "config.yaml", prof.name)
 PYEOF
 
+# --- 2b: per-profile routing env injection (every boot, not seed-once) ---
+# Routing vars (Telegram home channel, cron thread IDs) are profile-specific —
+# they cannot be in the shared inject list, and they must win over any stale
+# global value in os.environ so cron jobs deliver to the correct forum thread.
+# docker/profiles/<name>/routing.env is the source of truth (version-controlled).
+# Policy: upsert on every boot so a thread change in the image takes effect
+# on next container restart without requiring manual volume edits.
+if [ -d "$INSTALL_DIR/docker/profiles" ]; then
+    for src_routing in "$INSTALL_DIR/docker/profiles"/*/routing.env; do
+        [ -f "$src_routing" ] || continue
+        prof_name=$(basename "$(dirname "$src_routing")")
+        prof_env="$HERMES_HOME/profiles/$prof_name/.env"
+        [ -f "$HERMES_HOME/profiles/$prof_name/SOUL.md" ] || continue
+        as_hermes "$PY" - "$src_routing" "$prof_env" <<'PYEOF' || echo "[03-biglobster] Warning: routing.env inject failed for $prof_name"
+import sys, re
+from pathlib import Path
+src, dest = Path(sys.argv[1]), Path(sys.argv[2])
+routing_vars = {}
+for line in src.read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    k, _, v = line.partition("=")
+    routing_vars[k.strip()] = v.strip()
+content = dest.read_text(encoding="utf-8") if dest.exists() else ""
+for var, val in routing_vars.items():
+    if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
+        content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+    else:
+        sep = "" if (not content or content.endswith("\n")) else "\n"
+        content += f"{sep}{var}={val}\n"
+dest.write_text(content, encoding="utf-8")
+print(f"[03-biglobster] Injected routing.env into profiles/{Path(dest).parent.name}/.env")
+PYEOF
+    done
+fi
+
 # --- 3: seed agent memory on first boot ---
 if [ ! -f "$HERMES_HOME/memories/MEMORY.md" ] && [ -f "$INSTALL_DIR/docker/MEMORY.md" ]; then
     as_hermes cp "$INSTALL_DIR/docker/MEMORY.md" "$HERMES_HOME/memories/MEMORY.md" \
