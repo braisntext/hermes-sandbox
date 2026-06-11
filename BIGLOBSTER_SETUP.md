@@ -311,6 +311,47 @@ For agent execution detail: `https://blhermes.zeabur.app/logs`
 
 ## Incident log
 
+### 2026-06-11 — Orphan gateway on Zeabur K8s, root-caused and fixed (PR #23)
+
+The recurring "gateway won't start / `Telegram bot token already in use (PID NNNN)`"
+crash loop was root-caused and fixed in code.
+
+**Root cause:** `detect_service_manager()` only returned `"s6"` when `is_container()` was
+true. On Zeabur K8s `is_container()` returns **False** (no `/.dockerenv`, no docker cgroup
+markers), so it fell back to `"none"` and `hermes gateway start/restart` ran the gateway as
+a **raw, unsupervised subprocess**. That process detached into an orphan, held the Telegram
+token across restarts, and blocked the real s6-supervised gateway from connecting.
+
+**Fix (`fix(container): detect s6 on K8s …`, PR #23, merged to main):**
+- `hermes_cli/service_manager.py` — `detect_service_manager()` now returns `"s6"` whenever
+  `_s6_running()` is true (PID 1 is `s6-svscan` **and** `/run/s6/basedir` exists), no longer
+  gated on `is_container()`. So `hermes gateway start/stop/restart` now route through
+  `s6-svc` on Zeabur instead of spawning an unsupervised orphan.
+- `hermes_constants.py` — `is_container()` also detects K8s via
+  `/run/secrets/kubernetes.io/serviceaccount` (belt-and-suspenders for other callers).
+- Verified in prod: `detect_service_manager() == "s6"` even though `is_container() == False`.
+
+**The shared-token architecture (confirmed during this incident).** default, grow-shop and
+finview profiles **share one Telegram bot token** — proven because grow-shop's gateway (the
+orphan, PID 31026) held the exact scoped lock default needed (the lock path is
+`{scope}-sha256(token)[:16].lock`). Telegram allows one `getUpdates` poller per token, so the
+model is **one bot, one poller**:
+- **default** is the sole Telegram gateway — it polls, runs cron (all jobs are `profile:None`),
+  and routes inbound by forum topic (`telegram.extra.group_topics`: thread 2→default,
+  3→grow-shop, 61→finview).
+- **grow-shop / finview** gateways must stay **down**. Their `gateway_state.json` is
+  `stopped`/`startup_failed`, so `container_boot.py` registers them down and never auto-starts
+  them (only `running` auto-starts). Do **not** `s6-svc -u` them — a second poller on the
+  shared token just crash-loops on the lock.
+
+**Recovery (Zeabur panel terminal, root):** `export PATH=/command:$PATH;
+s6-svc -u /run/service/gateway-default`. The healthy gateway writes `gateway_state=running`
+itself, so it auto-starts on the next container restart. (s6 tools live in `/command/`, not on
+PATH.) Footgun still open: clicking dashboard "Start Gateway" for grow-shop/finview starts a
+poller that fails the shared-token lock and s6 restart-loops it ~every 3 s — harmless to
+default but noisy. Permanent guard would be to disable the telegram platform in those
+profiles' configs.
+
 ### 2026-06-08 — Cron jobs delivering to the old DM after the profiles migration
 
 Pre-migration BigLobster cron jobs (Content Gap Hunter, SEO Health Check, Repo Backup,
