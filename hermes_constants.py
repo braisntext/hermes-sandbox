@@ -356,10 +356,11 @@ _container_detected: bool | None = None
 
 
 def is_container() -> bool:
-    """Return True when running inside a Docker/Podman container.
+    """Return True when running inside a Docker/Podman/K8s container.
 
     Checks ``/.dockerenv`` (Docker), ``/run/.containerenv`` (Podman),
-    and ``/proc/1/cgroup`` for container runtime markers.  Result is
+    ``/run/secrets/kubernetes.io/serviceaccount`` (Kubernetes), and
+    ``/proc/1/cgroup`` for container runtime markers.  Result is
     cached for the process lifetime.  Import-safe — no heavy deps.
     """
     global _container_detected
@@ -369,6 +370,9 @@ def is_container() -> bool:
         _container_detected = True
         return True
     if os.path.exists("/run/.containerenv"):
+        _container_detected = True
+        return True
+    if os.path.exists("/run/secrets/kubernetes.io/serviceaccount"):
         _container_detected = True
         return True
     try:
