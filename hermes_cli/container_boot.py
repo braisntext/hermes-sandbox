@@ -6,7 +6,8 @@ on every container restart. Profile directories under
 each one records its gateway's last state in ``gateway_state.json``.
 This module bridges the two: on every container boot, walk the
 persistent profiles, recreate the s6 service slots, and auto-start
-only those whose last recorded state was ``running``.
+only those whose last recorded state was ``running`` — or whose last
+exit was an *involuntary* recycle of a healthy gateway (see below).
 
 Wired into the image as /etc/cont-init.d/02-reconcile-profiles by the
 Dockerfile (Phase 4 Task 4.0). Runs as root after 01-hermes-setup
@@ -28,12 +29,30 @@ from typing import Literal, Sequence
 
 log = logging.getLogger(__name__)
 
-# Only this prior state triggers automatic restart. Everything else
-# (startup_failed, starting, stopped, missing) registers the slot in
-# the down state and waits for explicit user action — this avoids the
+# A prior state of ``running`` always triggers automatic restart: the
+# container died while the gateway was up (e.g. SIGKILL, OOM, host crash)
+# without getting to persist a teardown state.
+#
+# Everything else (startup_failed, starting, missing) registers the slot
+# in the down state and waits for explicit user action — this avoids the
 # crash-loop where a broken gateway keeps being restarted across
 # `docker restart` cycles.
+#
+# ``stopped`` / ``draining`` are the graceful-teardown states. They cover
+# BOTH a deliberate ``hermes gateway stop`` AND an involuntary recycle
+# (orchestrator SIGTERM while healthy — e.g. Zeabur/K8s periodically
+# recycling the container). The ``involuntary_exit`` flag in
+# gateway_state.json disambiguates the two: a healthy gateway killed by an
+# external signal flags its exit involuntary and IS auto-restarted (the
+# user never asked it to stop); a user-initiated stop does not, and stays
+# down. ``startup_failed`` / ``starting`` never carry the flag, so the
+# crash-loop guard is preserved regardless of it. See ``_should_autostart``.
 _AUTOSTART_STATES = frozenset({"running"})
+
+# Graceful-teardown states that auto-restart ONLY when the last exit was
+# flagged involuntary (container recycle of a healthy gateway). A deliberate
+# user stop lands in the same states but without the flag, so it stays down.
+_INVOLUNTARY_AUTOSTART_STATES = frozenset({"stopped", "draining"})
 
 # Stale runtime files we sweep before recreating service slots. These
 # all hold container-namespaced state (PIDs, process tables) that's
@@ -104,14 +123,17 @@ def reconcile_profile_gateways(
         container_argv=container_argv,
         dry_run=dry_run,
     )
-    default_prior_state = legacy_default_state or _read_prior_state(hermes_home)
-    default_should_start = default_prior_state in _AUTOSTART_STATES
+    if legacy_default_state is not None:
+        default_prior = _PriorState(legacy_default_state)
+    else:
+        default_prior = _read_prior_state(hermes_home)
+    default_should_start = _should_autostart(default_prior)
     if not dry_run:
         _cleanup_stale_runtime_files(hermes_home)
         _register_service(scandir, "default", start=default_should_start)
     actions.append(ReconcileAction(
         profile="default",
-        prior_state=default_prior_state,
+        prior_state=default_prior.gateway_state,
         action="started" if default_should_start else "registered",
     ))
 
@@ -139,8 +161,8 @@ def reconcile_profile_gateways(
                 )
                 continue
 
-            prior_state = _read_prior_state(entry)
-            should_start = prior_state in _AUTOSTART_STATES
+            prior = _read_prior_state(entry)
+            should_start = _should_autostart(prior)
 
             if not dry_run:
                 _cleanup_stale_runtime_files(entry)
@@ -148,7 +170,7 @@ def reconcile_profile_gateways(
 
             actions.append(ReconcileAction(
                 profile=entry.name,
-                prior_state=prior_state,
+                prior_state=prior.gateway_state,
                 action="started" if should_start else "registered",
             ))
 
@@ -217,20 +239,54 @@ def _is_legacy_gateway_run_request(argv: Sequence[str]) -> bool:
     return len(args) >= 2 and args[0] == "gateway" and args[1] == "run"
 
 
-def _read_prior_state(profile_dir: Path) -> str | None:
-    """Read gateway_state.json's ``gateway_state`` field, or None if
-    missing or unparseable. Unparseable counts as "no prior state" so
-    we don't bork the whole reconciliation on a corrupt file."""
+@dataclass(frozen=True)
+class _PriorState:
+    """The decision-relevant fields of a profile's gateway_state.json."""
+    gateway_state: str | None
+    involuntary_exit: bool = False
+
+
+def _read_prior_state(profile_dir: Path) -> _PriorState:
+    """Read gateway_state.json's ``gateway_state`` and ``involuntary_exit``
+    fields. A missing or unparseable file counts as "no prior state" (and
+    not involuntary) so we don't bork the whole reconciliation on a corrupt
+    file. ``involuntary_exit`` is absent in records written before this
+    field existed, so it defaults to False — i.e. the old conservative
+    behavior (graceful stops stay down)."""
     state_file = profile_dir / "gateway_state.json"
     if not state_file.exists():
-        return None
+        return _PriorState(None)
     try:
-        return json.loads(state_file.read_text()).get("gateway_state")
+        data = json.loads(state_file.read_text())
     except (OSError, json.JSONDecodeError):
         log.warning(
             "could not read %s; treating as no prior state", state_file,
         )
-        return None
+        return _PriorState(None)
+    return _PriorState(
+        gateway_state=data.get("gateway_state"),
+        involuntary_exit=bool(data.get("involuntary_exit", False)),
+    )
+
+
+def _should_autostart(prior: _PriorState) -> bool:
+    """Decide whether a profile's gateway slot auto-starts on this boot.
+
+    ``running`` always auto-starts (container died with the gateway up).
+    Graceful-teardown states (``stopped`` / ``draining``) auto-start ONLY
+    when the exit was flagged involuntary — an external SIGTERM recycle of
+    a healthy gateway, never a deliberate ``hermes gateway stop``.
+
+    ``startup_failed`` / ``starting`` never carry the involuntary flag (it's
+    reset at the start of each lifecycle and only set by the shutdown signal
+    handler), so the crash-loop guard holds even if a stale flag were
+    present: those states aren't in ``_INVOLUNTARY_AUTOSTART_STATES``."""
+    if prior.gateway_state in _AUTOSTART_STATES:
+        return True
+    return (
+        prior.involuntary_exit
+        and prior.gateway_state in _INVOLUNTARY_AUTOSTART_STATES
+    )
 
 
 def _cleanup_stale_runtime_files(profile_dir: Path) -> None:

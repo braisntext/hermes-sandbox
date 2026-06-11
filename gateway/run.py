@@ -1814,6 +1814,14 @@ class GatewayRunner:
         self._exit_with_failure = False
         self._exit_reason: Optional[str] = None
         self._exit_code: Optional[int] = None
+        # Set True when an involuntary signal (container teardown / external
+        # SIGTERM while healthy) — not a user `hermes gateway stop`, SIGINT,
+        # or planned restart/takeover — drives shutdown. Persisted to
+        # gateway_state.json so container-boot reconciliation can tell a
+        # recycle of a running gateway apart from a deliberate stop and
+        # auto-restart it. See gateway/run.py:shutdown_signal_handler and
+        # hermes_cli/container_boot._should_autostart.
+        self._involuntary_shutdown = False
         self._draining = False
         self._restart_requested = False
         self._restart_task_started = False
@@ -2882,6 +2890,7 @@ class GatewayRunner:
                 gateway_state=gateway_state,
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
+                involuntary_exit=self._involuntary_shutdown,
                 active_agents=self._running_agent_count(),
             )
         except Exception:
@@ -4244,7 +4253,11 @@ class GatewayRunner:
             pass
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(gateway_state="starting", exit_reason=None)
+            # Reset involuntary_exit at the start of each lifecycle so a stale
+            # True from a prior recycle can't linger into this run's records.
+            write_runtime_status(
+                gateway_state="starting", exit_reason=None, involuntary_exit=False,
+            )
         except Exception:
             pass
 
@@ -19442,6 +19455,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             )
         else:
             _signal_initiated_shutdown = True
+            # Involuntary kill of a (presumed healthy) gateway — container
+            # teardown or external SIGTERM, NOT a user stop. Mark the runner
+            # so the final gateway_state.json records involuntary_exit=True
+            # and container-boot reconciliation auto-restarts the slot on the
+            # next boot instead of leaving it down. Restart requests are
+            # handled separately (SIGUSR1 / _restart_requested) and stay
+            # planned, so they don't trip this branch.
+            runner._involuntary_shutdown = True
             logger.info(
                 "Received %s — initiating shutdown",
                 _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM/SIGINT",

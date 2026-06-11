@@ -215,6 +215,7 @@ def _build_runtime_status_record() -> dict[str, Any]:
         "gateway_state": "starting",
         "exit_reason": None,
         "restart_requested": False,
+        "involuntary_exit": False,
         "active_agents": 0,
         "platforms": {},
         "updated_at": _utc_now_iso(),
@@ -506,6 +507,7 @@ def write_runtime_status(
     gateway_state: Any = _UNSET,
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
+    involuntary_exit: Any = _UNSET,
     active_agents: Any = _UNSET,
     platform: Any = _UNSET,
     platform_state: Any = _UNSET,
@@ -529,6 +531,8 @@ def write_runtime_status(
         payload["exit_reason"] = exit_reason
     if restart_requested is not _UNSET:
         payload["restart_requested"] = bool(restart_requested)
+    if involuntary_exit is not _UNSET:
+        payload["involuntary_exit"] = bool(involuntary_exit)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
 

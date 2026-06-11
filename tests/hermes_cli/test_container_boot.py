@@ -30,10 +30,17 @@ def _make_profile(
     name: str,
     *,
     state: str | None,
+    involuntary_exit: bool | None = None,
     with_pid: bool = False,
     config: bool = True,
 ) -> Path:
-    """Create a fake profile directory under hermes_home/profiles/<name>/."""
+    """Create a fake profile directory under hermes_home/profiles/<name>/.
+
+    ``involuntary_exit``: when not None, write the gateway_state.json field
+    of the same name (the flag the gateway sets when an external SIGTERM
+    recycles a healthy gateway). Left absent by default so existing tests
+    exercise the pre-field behavior.
+    """
     p = hermes_home / "profiles" / name
     p.mkdir(parents=True)
     if config:
@@ -41,9 +48,10 @@ def _make_profile(
         # `hermes profile create`. See container_boot._render_run_script.
         (p / "SOUL.md").write_text("# fake profile\n")
     if state is not None:
-        (p / "gateway_state.json").write_text(json.dumps({
-            "gateway_state": state, "timestamp": 1234567890,
-        }))
+        record: dict = {"gateway_state": state, "timestamp": 1234567890}
+        if involuntary_exit is not None:
+            record["involuntary_exit"] = involuntary_exit
+        (p / "gateway_state.json").write_text(json.dumps(record))
     if with_pid:
         (p / "gateway.pid").write_text(json.dumps(
             {"pid": 99999, "host": "old-container"},
@@ -56,14 +64,16 @@ def _seed_default_root(
     hermes_home: Path,
     *,
     state: str | None = None,
+    involuntary_exit: bool | None = None,
     with_pid: bool = False,
 ) -> None:
     """Populate gateway_state.json / stale runtime files at the
     HERMES_HOME root (the implicit default profile)."""
     if state is not None:
-        (hermes_home / "gateway_state.json").write_text(json.dumps({
-            "gateway_state": state, "timestamp": 1234567890,
-        }))
+        record: dict = {"gateway_state": state, "timestamp": 1234567890}
+        if involuntary_exit is not None:
+            record["involuntary_exit"] = involuntary_exit
+        (hermes_home / "gateway_state.json").write_text(json.dumps(record))
     if with_pid:
         (hermes_home / "gateway.pid").write_text(json.dumps(
             {"pid": 99999, "host": "old-container"},
@@ -128,6 +138,113 @@ def test_startup_failed_does_not_autostart(tmp_path: Path) -> None:
     named = _named_actions(actions)
     assert named[0].action == "registered"
     assert (scandir / "gateway-broken" / "down").exists()
+
+
+# ---------------------------------------------------------------------------
+# Involuntary-exit autostart — graceful SIGTERM recycle of a healthy gateway
+# (e.g. Zeabur/K8s periodically recycling the container) must come back up,
+# while a deliberate `hermes gateway stop` stays down.
+# ---------------------------------------------------------------------------
+
+
+def test_involuntary_stopped_autostarts(tmp_path: Path) -> None:
+    """A healthy gateway killed by an external SIGTERM persists
+    state=stopped with involuntary_exit=True — reconcile must revive it
+    (the user never asked it to stop)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "coder", state="stopped", involuntary_exit=True)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    assert _named_actions(actions) == [ReconcileAction(
+        profile="coder", prior_state="stopped", action="started",
+    )]
+    assert not (scandir / "gateway-coder" / "down").exists()
+
+
+def test_involuntary_draining_autostarts(tmp_path: Path) -> None:
+    """If the container died mid-drain (state=draining) after an
+    involuntary signal, the slot still comes back up."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "coder", state="draining", involuntary_exit=True)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    named = _named_actions(actions)
+    assert named[0].action == "started"
+    assert not (scandir / "gateway-coder" / "down").exists()
+
+
+def test_user_stop_stays_down(tmp_path: Path) -> None:
+    """A deliberate `hermes gateway stop` writes state=stopped WITHOUT
+    the involuntary flag — it must stay down across a recycle."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "coder", state="stopped", involuntary_exit=False)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    named = _named_actions(actions)
+    assert named[0].action == "registered"
+    assert (scandir / "gateway-coder" / "down").exists()
+
+
+def test_startup_failed_with_involuntary_flag_still_stays_down(
+    tmp_path: Path,
+) -> None:
+    """Crash-loop guard is absolute: even if a startup_failed record
+    somehow carried involuntary_exit=True, the state is not a graceful-
+    teardown state, so the slot stays down (no restart loop on a broken
+    gateway)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(
+        tmp_path, "broken", state="startup_failed", involuntary_exit=True,
+    )
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    named = _named_actions(actions)
+    assert named[0].action == "registered"
+    assert (scandir / "gateway-broken" / "down").exists()
+
+
+def test_default_slot_involuntary_stopped_autostarts(tmp_path: Path) -> None:
+    """The default slot is the sole Telegram poller — an involuntary
+    recycle of the running default gateway MUST auto-restart, which is
+    the whole point of the fix (orphan-gateway-after-recycle outages)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped", involuntary_exit=True)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    default_action = next(a for a in actions if a.profile == "default")
+    assert default_action.prior_state == "stopped"
+    assert default_action.action == "started"
+    assert not (scandir / "gateway-default" / "down").exists()
+
+
+def test_default_slot_user_stop_stays_down(tmp_path: Path) -> None:
+    """Deliberate stop of the default gateway survives a recycle as
+    down — operator intent is preserved."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped", involuntary_exit=False)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    default_action = next(a for a in actions if a.profile == "default")
+    assert default_action.action == "registered"
+    assert (scandir / "gateway-default" / "down").exists()
 
 
 def test_starting_state_does_not_autostart(tmp_path: Path) -> None:
