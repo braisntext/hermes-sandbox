@@ -471,9 +471,48 @@ def load_jobs() -> List[Dict[str, Any]]:
     )
 
 
+_BACKUP_KEEP_DAYS = 7
+
+
+def _backup_jobs_file() -> None:
+    """Backup jobs.json before each overwrite.
+
+    Two tiers:
+    - jobs.json.bak: single rolling pre-write backup (immediate recovery from
+      accidental wipe or single bad write).
+    - cron/backups/jobs-YYYYMMDD.json: first write per calendar day, pruned to
+      _BACKUP_KEEP_DAYS daily snapshots (recovers from multi-day data loss).
+
+    Called inside save_jobs() BEFORE the atomic replace so the backup always
+    reflects the last known-good state. Never raises — backup failure must
+    never block the primary write.
+    """
+    if not JOBS_FILE.exists():
+        return
+    try:
+        import shutil
+        # Tier 1 — rolling single-step backup of current file
+        bak = JOBS_FILE.with_suffix(".bak")
+        shutil.copy2(str(JOBS_FILE), str(bak))
+        _secure_file(bak)
+        # Tier 2 — daily snapshot (one per calendar day)
+        backup_dir = CRON_DIR / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        daily = backup_dir / f"jobs-{_hermes_now().strftime('%Y%m%d')}.json"
+        if not daily.exists():
+            shutil.copy2(str(JOBS_FILE), str(daily))
+            _secure_file(daily)
+            # Prune oldest beyond the retention window
+            for old in sorted(backup_dir.glob("jobs-*.json"))[:-_BACKUP_KEEP_DAYS]:
+                old.unlink(missing_ok=True)
+    except Exception:
+        pass  # never fatal
+
+
 def save_jobs(jobs: List[Dict[str, Any]]):
     """Save all jobs to storage."""
     ensure_dirs()
+    _backup_jobs_file()
     fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:

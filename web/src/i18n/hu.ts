@@ -218,7 +218,11 @@ export const hu: Translations = {
     next: "Következő",
     pause: "Szüneteltetés",
     resume: "Folytatás",
-    triggerNow: "Indítás most",
+    triggerNow: "Azonnali indítás",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "Helyi",
       telegram: "Telegram",

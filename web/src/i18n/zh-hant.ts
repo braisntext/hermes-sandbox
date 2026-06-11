@@ -219,6 +219,10 @@ export const zhHant: Translations = {
     pause: "暫停",
     resume: "繼續",
     triggerNow: "立即觸發",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "本機",
       telegram: "Telegram",

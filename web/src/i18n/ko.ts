@@ -219,6 +219,10 @@ export const ko: Translations = {
     pause: "일시 정지",
     resume: "재개",
     triggerNow: "지금 실행",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "로컬",
       telegram: "Telegram",

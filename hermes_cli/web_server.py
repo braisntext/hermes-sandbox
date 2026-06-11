@@ -4394,6 +4394,63 @@ async def delete_cron_job(job_id: str, profile: Optional[str] = None):
     return {"ok": True}
 
 
+def _cron_schedule_expr(job: Dict[str, Any]) -> str:
+    """Return the raw schedule expression from a stored job dict.
+
+    Reconstructs a string that parse_schedule() can re-ingest:
+    - cron jobs   → the cron expression (e.g. "0 9 * * *")
+    - interval    → "every Nm" (e.g. "every 30m")
+    - once/other  → schedule_display as a best-effort fallback
+    """
+    sched = job.get("schedule") or {}
+    kind = str(sched.get("kind") or "")
+    if kind == "cron":
+        return str(sched.get("expr") or "")
+    if kind == "interval":
+        mins = sched.get("minutes") or 0
+        return f"every {int(mins)}m"
+    return str(job.get("schedule_display") or sched.get("display") or "")
+
+
+@app.post("/api/cron/jobs/{job_id}/copy")
+async def copy_cron_job(
+    job_id: str,
+    to_profile: str = "default",
+    profile: Optional[str] = None,
+):
+    """Copy a cron job to another (or the same) profile."""
+    source_profile = profile or _find_cron_job_profile(job_id)
+    if not source_profile:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_job = _call_cron_for_profile(source_profile, "get_job", job_id)
+    if not source_job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    schedule_expr = _cron_schedule_expr(source_job)
+    if not schedule_expr:
+        raise HTTPException(status_code=400, detail="Cannot determine schedule expression for copy")
+    try:
+        new_job = _call_cron_for_profile(
+            to_profile,
+            "create_job",
+            prompt=source_job.get("prompt") or "",
+            schedule=schedule_expr,
+            name=source_job.get("name") or "",
+            deliver=source_job.get("deliver") or "local",
+            skills=source_job.get("skills") or None,
+            model=source_job.get("model") or None,
+            provider=source_job.get("provider") or None,
+            base_url=source_job.get("base_url") or None,
+            script=source_job.get("script") or None,
+            no_agent=bool(source_job.get("no_agent")),
+            enabled_toolsets=source_job.get("enabled_toolsets") or None,
+            workdir=source_job.get("workdir") or None,
+        )
+    except Exception as exc:
+        _log.exception("POST /api/cron/jobs/%s/copy failed", job_id)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return new_job
+
+
 # ---------------------------------------------------------------------------
 # MCP server endpoints — list / add / remove / test.
 #

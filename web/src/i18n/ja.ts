@@ -219,6 +219,10 @@ export const ja: Translations = {
     pause: "一時停止",
     resume: "再開",
     triggerNow: "今すぐ実行",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "ローカル",
       telegram: "Telegram",

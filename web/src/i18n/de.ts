@@ -219,6 +219,10 @@ export const de: Translations = {
     pause: "Pausieren",
     resume: "Fortsetzen",
     triggerNow: "Jetzt auslösen",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "Lokal",
       telegram: "Telegram",

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
-import { Clock, Pause, Pencil, Play, Trash2, X, Zap } from "lucide-react";
+import { Clock, Copy, Download, Pause, Pencil, Play, Trash2, X, Zap } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
@@ -118,6 +118,16 @@ export default function CronPage() {
   const [deliver, setDeliver] = useState("local");
   const [creating, setCreating] = useState(false);
   const createProfile = selectedProfile === "all" ? "default" : selectedProfile;
+
+  // Copy to profile modal state
+  const [copyJob, setCopyJob] = useState<CronJob | null>(null);
+  const [copyTargetProfile, setCopyTargetProfile] = useState("default");
+  const [copying, setCopying] = useState(false);
+  const closeCopyModal = useCallback(() => setCopyJob(null), []);
+  const copyModalRef = useModalBehavior({
+    open: copyJob !== null,
+    onClose: closeCopyModal,
+  });
 
   // Edit job modal state
   const [editJob, setEditJob] = useState<CronJob | null>(null);
@@ -255,6 +265,61 @@ export default function CronPage() {
     }
   };
 
+  const handleCopy = async () => {
+    if (!copyJob) return;
+    setCopying(true);
+    try {
+      await api.copyCronJob(copyJob.id, getJobProfile(copyJob), copyTargetProfile);
+      showToast(`Copied to "${copyTargetProfile}" ✓`, "success");
+      setCopyJob(null);
+      loadJobs();
+    } catch (e) {
+      showToast(`${t.status.error}: ${e}`, "error");
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const handleExport = useCallback(() => {
+    const exportData = {
+      exported_at: new Date().toISOString(),
+      profile: selectedProfile,
+      jobs: jobs.map((j) => ({
+        id: j.id,
+        name: j.name,
+        prompt: j.prompt,
+        schedule: j.schedule,
+        schedule_display: j.schedule_display,
+        deliver: j.deliver,
+        skills: j.skills,
+        skill: j.skill,
+        script: j.script,
+        no_agent: j.no_agent,
+        model: j.model,
+        provider: j.provider,
+        base_url: j.base_url,
+        enabled_toolsets: j.enabled_toolsets,
+        workdir: j.workdir,
+        state: j.state,
+        enabled: j.enabled,
+        last_run_at: j.last_run_at,
+        next_run_at: j.next_run_at,
+        last_error: j.last_error,
+        profile: j.profile,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `hermes-cron-${selectedProfile}-${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [jobs, selectedProfile]);
+
   const jobDelete = useConfirmDelete({
     onDelete: useCallback(
       async (key: string) => {
@@ -276,21 +341,32 @@ export default function CronPage() {
     ),
   });
 
-  // Put "Create" button in page header
+  // Put "Export" + "Create" buttons in page header
   useLayoutEffect(() => {
     setEnd(
-      <Button
-        className="uppercase"
-        size="sm"
-        onClick={() => setCreateModalOpen(true)}
-      >
-        {t.common.create}
-      </Button>,
+      <div className="flex items-center gap-2">
+        <Button
+          ghost
+          size="icon"
+          title={t.cron.exportBackup}
+          aria-label={t.cron.exportBackup}
+          onClick={handleExport}
+        >
+          <Download className="h-4 w-4" />
+        </Button>
+        <Button
+          className="uppercase"
+          size="sm"
+          onClick={() => setCreateModalOpen(true)}
+        >
+          {t.common.create}
+        </Button>
+      </div>,
     );
     return () => {
       setEnd(null);
     };
-  }, [setEnd, t.common.create, loading]);
+  }, [setEnd, t.common.create, t.cron.exportBackup, handleExport, loading]);
 
   if (loading) {
     return (
@@ -551,6 +627,71 @@ export default function CronPage() {
         </div>
       )}
 
+      {/* Copy to profile modal */}
+      {copyJob && (
+        <div
+          ref={copyModalRef}
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 backdrop-blur-sm p-4"
+          onClick={(e) => e.target === e.currentTarget && setCopyJob(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="copy-cron-title"
+        >
+          <div className={cn(themedBody, "relative w-full max-w-sm border border-border bg-card shadow-2xl flex flex-col")}>
+            <Button
+              ghost
+              size="icon"
+              onClick={() => setCopyJob(null)}
+              className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+              aria-label="Close"
+            >
+              <X />
+            </Button>
+
+            <header className="p-5 pb-3 border-b border-border">
+              <h2
+                id="copy-cron-title"
+                className="font-mondwest text-display text-base tracking-wider"
+              >
+                {t.cron.copyToProfileTitle}
+              </h2>
+              <p className="text-sm text-muted-foreground mt-1 truncate">
+                &ldquo;{truncateText(getJobTitle(copyJob), 40)}&rdquo;
+              </p>
+            </header>
+
+            <div className="p-5 grid gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="copy-cron-profile">{t.cron.copyTargetProfile}</Label>
+                <Select
+                  id="copy-cron-profile"
+                  value={copyTargetProfile}
+                  onValueChange={(v) => setCopyTargetProfile(v)}
+                >
+                  {profiles.map((profile) => (
+                    <SelectOption key={profile.name} value={profile.name}>
+                      {profileLabel(profile.name)}
+                    </SelectOption>
+                  ))}
+                </Select>
+              </div>
+
+              <div className="flex justify-end">
+                <Button
+                  className="uppercase"
+                  size="sm"
+                  onClick={handleCopy}
+                  disabled={copying}
+                  prefix={copying ? <Spinner /> : undefined}
+                >
+                  {copying ? t.common.loading : t.common.create}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <H2
@@ -666,6 +807,22 @@ export default function CronPage() {
                     onClick={() => openEditModal(job)}
                   >
                     <Pencil />
+                  </Button>
+
+                  <Button
+                    ghost
+                    size="icon"
+                    title={t.cron.copyToProfile}
+                    aria-label={t.cron.copyToProfile}
+                    onClick={() => {
+                      const otherProfile =
+                        profiles.find((p) => p.name !== profile)?.name ||
+                        "default";
+                      setCopyTargetProfile(otherProfile);
+                      setCopyJob(job);
+                    }}
+                  >
+                    <Copy />
                   </Button>
 
                   <Button

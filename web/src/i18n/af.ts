@@ -218,7 +218,11 @@ export const af: Translations = {
     next: "Volgende",
     pause: "Pouse",
     resume: "Hervat",
-    triggerNow: "Voer nou uit",
+    triggerNow: "Aktiveer nou",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "Plaaslik",
       telegram: "Telegram",

@@ -218,7 +218,11 @@ export const ga: Translations = {
     next: "Ar aghaidh",
     pause: "Sos",
     resume: "Lean ar aghaidh",
-    triggerNow: "Spreag anois",
+    triggerNow: "Cuir i ngníomh anois",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "Áitiúil",
       telegram: "Telegram",
