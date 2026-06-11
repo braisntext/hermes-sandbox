@@ -239,6 +239,10 @@ export interface Translations {
     pause: string;
     resume: string;
     triggerNow: string;
+    copyToProfile: string;
+    copyToProfileTitle: string;
+    copyTargetProfile: string;
+    exportBackup: string;
     delivery: {
       local: string;
       telegram: string;

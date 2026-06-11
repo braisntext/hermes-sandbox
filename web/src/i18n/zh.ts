@@ -216,6 +216,10 @@ export const zh: Translations = {
     pause: "暂停",
     resume: "恢复",
     triggerNow: "立即触发",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "本地",
       telegram: "Telegram",

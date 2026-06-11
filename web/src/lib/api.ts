@@ -348,6 +348,11 @@ export const api = {
     fetchJSON<CronJob>(`/api/cron/jobs/${encodeURIComponent(id)}/trigger?profile=${encodeURIComponent(profile)}`, { method: "POST" }),
   deleteCronJob: (id: string, profile = "default") =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`, { method: "DELETE" }),
+  copyCronJob: (id: string, fromProfile = "default", toProfile = "default") =>
+    fetchJSON<CronJob>(
+      `/api/cron/jobs/${encodeURIComponent(id)}/copy?profile=${encodeURIComponent(fromProfile)}&to_profile=${encodeURIComponent(toProfile)}`,
+      { method: "POST" },
+    ),
 
   // Profiles (minimal)
   getProfiles: () =>
@@ -1281,7 +1286,15 @@ export interface CronJob {
   name?: string | null;
   prompt?: string | null;
   script?: string | null;
-  schedule?: { kind?: string; expr?: string; display?: string };
+  no_agent?: boolean | null;
+  skills?: string[] | null;
+  skill?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  base_url?: string | null;
+  enabled_toolsets?: string[] | null;
+  workdir?: string | null;
+  schedule?: { kind?: string; expr?: string; display?: string; minutes?: number };
   schedule_display?: string | null;
   enabled: boolean;
   state?: string | null;

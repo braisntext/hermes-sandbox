@@ -219,6 +219,10 @@ export const tr: Translations = {
     pause: "Duraklat",
     resume: "Devam ettir",
     triggerNow: "Şimdi tetikle",
+    copyToProfile: "Copy to profile",
+    copyToProfileTitle: "Copy job to another profile",
+    copyTargetProfile: "Target profile",
+    exportBackup: "Export backup",
     delivery: {
       local: "Yerel",
       telegram: "Telegram",
