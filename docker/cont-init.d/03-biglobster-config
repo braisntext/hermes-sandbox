@@ -250,6 +250,17 @@ fi
 # HOME=/opt/data so --global writes to $HERMES_HOME/.gitconfig on the volume.
 # .git-credentials is re-written each boot so a rotated token takes effect
 # without requiring a rebuild or manual intervention.
+#
+# The SAME credential is mirrored into every profile's subprocess HOME
+# ($HERMES_HOME/profiles/<name>/home). Per-profile cron jobs run git with
+# that dir as HOME (see hermes_constants.get_subprocess_home()), so they read
+# a DIFFERENT .gitconfig / .git-credentials than the default profile's. Before
+# this loop, section 4 only refreshed the default, so after a $GITHUB_TOKEN
+# rotation every profile home kept a STALE (revoked) token and profile-scoped
+# push/clone broke — the failure hand-fixed for the finview profile on
+# 2026-06-12. Guard: only profiles whose home/ dir already exists (mirrors
+# get_subprocess_home, which returns None otherwise) so we never create a
+# spurious home/. SOUL.md is the real-profile marker, same as sections 1/2/5.
 if [ -n "$GITHUB_TOKEN" ]; then
     HOME="$HERMES_HOME" git config --global credential.helper store
     HOME="$HERMES_HOME" git config --global user.name "Hermes Agent"
@@ -258,6 +269,25 @@ if [ -n "$GITHUB_TOKEN" ]; then
     chmod 600 "$HERMES_HOME/.git-credentials"
     chown hermes:hermes "$HERMES_HOME/.git-credentials" 2>/dev/null || true
     echo "[03-biglobster] git HTTPS credential configured (x-access-token)"
+
+    # Per-profile subprocess homes — run as hermes (profile homes are
+    # hermes-owned). Idempotent + non-fatal, matching the script's contract.
+    if [ -d "$HERMES_HOME/profiles" ]; then
+        for prof_dir in "$HERMES_HOME/profiles"/*/; do
+            [ -f "${prof_dir}SOUL.md" ] || continue
+            prof_home="${prof_dir}home"
+            [ -d "$prof_home" ] || continue
+            prof_name=$(basename "$prof_dir")
+            HOME="$prof_home" as_hermes git config --global credential.helper store \
+                || echo "[03-biglobster] Warning: git config failed for profile $prof_name (non-fatal)"
+            HOME="$prof_home" as_hermes git config --global user.name "Hermes Agent" 2>/dev/null || true
+            HOME="$prof_home" as_hermes git config --global user.email "hermes@agent.local" 2>/dev/null || true
+            printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" > "$prof_home/.git-credentials"
+            chmod 600 "$prof_home/.git-credentials"
+            chown hermes:hermes "$prof_home/.git-credentials" 2>/dev/null || true
+            echo "[03-biglobster] git HTTPS credential configured for profile: $prof_name"
+        done
+    fi
 else
     echo "[03-biglobster] GITHUB_TOKEN not set — git HTTPS credential skipped"
 fi
