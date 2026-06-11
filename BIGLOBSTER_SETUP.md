@@ -349,8 +349,12 @@ new forum group, and PRs were failing. Root causes, in order of discovery:
 
 Also surfaced/fixed: the live gateway was an unsupervised orphan from a manual `gateway
 restart` (s6 `gateway-default` was stuck `down`, "already running"); killed it so s6 took
-over. The recycle-autostart fragility (graceful shutdown → `draining` → no autostart) is
-tracked separately. The Repo Backup job had its bash pasted into the `script` field (which
+over. The recycle-autostart fragility (graceful shutdown → `stopped`/`draining` → no
+autostart) is **fixed in PR #26**: the gateway now records `involuntary_exit` in
+`gateway_state.json` on an external SIGTERM (container recycle), and `container_boot`
+reconciliation auto-restarts `stopped`/`draining` slots flagged that way, while a deliberate
+`hermes gateway stop` (and `startup_failed`) still stays down. Takes effect after the next
+Cloud Build → Zeabur redeploy. The Repo Backup job had its bash pasted into the `script` field (which
 expects a filename under `/opt/data/scripts/`) → "Script not found" every run; fixed by
 writing `scripts/backup-repo.sh` and setting `script: backup-repo.sh`.
 
