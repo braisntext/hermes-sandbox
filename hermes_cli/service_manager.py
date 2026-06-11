@@ -86,7 +86,8 @@ def detect_service_manager() -> ServiceManagerKind:
     """Detect which service manager is available in this environment.
 
     Returns:
-        "s6" — inside a container when /init is s6-svscan (Phase 2+)
+        "s6" — when s6-svscan is PID 1 and /run/s6/basedir exists (container
+               or K8s pod running under s6-overlay, regardless of /.dockerenv)
         "windows" — native Windows host
         "launchd" — macOS host
         "systemd" — Linux host with a working user/system bus
@@ -96,18 +97,24 @@ def detect_service_manager() -> ServiceManagerKind:
     host call sites continue to use that. It exists for new backend-
     agnostic code (profile create/delete hooks, the s6 dispatch path
     in ``hermes gateway start/stop/restart``).
+
+    Note: s6 detection no longer gates on ``is_container()``.  K8s runtimes
+    (e.g. Zeabur) don't create ``/.dockerenv`` or set container cgroup markers,
+    so the old ``is_container() and _s6_running()`` check silently returned
+    "none" even when s6-svscan was PID 1.  ``_s6_running()`` already requires
+    two independent signals (``/proc/1/comm`` + ``/run/s6/basedir``) so it is
+    robust enough to stand alone.
     """
     # Imports deferred so importing this module doesn't drag in the
     # whole gateway dependency graph for callers that only need the
     # Protocol type or validate_profile_name().
-    from hermes_constants import is_container
     from hermes_cli.gateway import (
         is_macos,
         is_windows,
         supports_systemd_services,
     )
 
-    if is_container() and _s6_running():
+    if _s6_running():
         return "s6"
     if is_windows():
         return "windows"
