@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_kickoff_ping, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -1902,6 +1902,103 @@ class TestSilentDelivery:
             "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
             delivery_error=None,
         )
+
+
+class TestKickoffPing:
+    """Verify the start-of-run kickoff ping: target reuse, config gate, non-fatal."""
+
+    def _telegram_job(self, **extra):
+        job = {
+            "id": "kickoff-job",
+            "name": "daily-report",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+        job.update(extra)
+        return job
+
+    def _mock_gateway_cfg(self):
+        from gateway.config import Platform
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        return mock_cfg
+
+    def test_kickoff_sends_lightweight_line_to_target(self):
+        """A telegram-deliver job posts a one-line '🔄 Started' ping — no Cronjob envelope."""
+        with patch("gateway.config.load_gateway_config", return_value=self._mock_gateway_cfg()), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": True}}):
+            _send_kickoff_ping(self._telegram_job(schedule_display="every day at 9am"))
+
+        send_mock.assert_called_once()
+        sent = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert "🔄 Started: daily-report" in sent
+        assert "every day at 9am" in sent
+        assert "Cronjob Response" not in sent
+        assert "job_id" not in sent
+
+    def test_kickoff_preserves_thread_id(self):
+        """Kickoff must land in the same thread as the final delivery (e.g. thread 61)."""
+        job = self._telegram_job(origin={"platform": "telegram", "chat_id": "-1001", "thread_id": "61"})
+        with patch("gateway.config.load_gateway_config", return_value=self._mock_gateway_cfg()), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": True}}):
+            _send_kickoff_ping(job)
+        send_mock.assert_called_once()
+        assert send_mock.call_args.kwargs["thread_id"] == "61"
+
+    def test_kickoff_skipped_for_local_deliver(self):
+        """deliver:local jobs must stay silent — no kickoff sent."""
+        with patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": True}}):
+            _send_kickoff_ping({"id": "local-job", "name": "n", "deliver": "local"})
+        send_mock.assert_not_called()
+
+    def test_kickoff_disabled_by_config(self):
+        """cron.progress_pings: false disables the kickoff entirely."""
+        with patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": False}}):
+            _send_kickoff_ping(self._telegram_job())
+        send_mock.assert_not_called()
+
+    def test_kickoff_enabled_by_default_when_unset(self):
+        """Absent config key defaults to on."""
+        with patch("gateway.config.load_gateway_config", return_value=self._mock_gateway_cfg()), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={}):
+            _send_kickoff_ping(self._telegram_job())
+        send_mock.assert_called_once()
+
+    def test_kickoff_failure_is_non_fatal(self):
+        """A send failure inside the ping must be swallowed, not raised."""
+        with patch("cron.scheduler._send_to_targets", side_effect=RuntimeError("boom")), \
+             patch("gateway.config.load_gateway_config", return_value=self._mock_gateway_cfg()), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": True}}):
+            assert _send_kickoff_ping(self._telegram_job()) is None
+
+    def test_kickoff_fires_before_run_job(self):
+        """tick must post the kickoff ping before invoking run_job."""
+        from unittest.mock import Mock
+        manager = Mock()
+        ping_mock = Mock()
+        run_mock = Mock(return_value=(True, "# output", "done", None))
+        manager.attach_mock(ping_mock, "ping")
+        manager.attach_mock(run_mock, "run")
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._telegram_job()]), \
+             patch("cron.scheduler._send_kickoff_ping", ping_mock), \
+             patch("cron.scheduler.run_job", run_mock), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        names = [c[0] for c in manager.mock_calls]
+        assert "ping" in names and "run" in names
+        assert names.index("ping") < names.index("run")
 
 
 class TestBuildJobPromptSilentHint:

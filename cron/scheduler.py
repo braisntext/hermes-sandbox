@@ -615,64 +615,29 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _send_to_targets(
+    job: dict,
+    targets: List[dict],
+    text: str,
+    media_files: list,
+    config,
+    adapters=None,
+    loop=None,
+) -> List[str]:
+    """Low-level multi-target sender: live-adapter-first then standalone fallback.
+
+    Shared by the final-result delivery (:func:`_deliver_result`) and the
+    lightweight kickoff ping (:func:`_send_kickoff_ping`).  Handles per-target
+    thread routing, the live-adapter/standalone fallback, and native media
+    attachments.  Does NOT wrap content or extract MEDIA tags — callers prepare
+    ``text`` and ``media_files`` first.
+
+    Returns a list of delivery error strings (empty on full success).
     """
-    Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
-
-    When ``adapters`` and ``loop`` are provided (gateway is running), tries to
-    use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
-    the standalone HTTP path cannot encrypt.  Falls back to standalone send if
-    the adapter path fails or is unavailable.
-
-    Returns None on success, or an error string on failure.
-    """
-    targets = _resolve_delivery_targets(job)
-    if not targets:
-        if job.get("deliver", "local") != "local":
-            msg = f"no delivery target resolved for deliver={job.get('deliver', 'local')}"
-            logger.warning("Job '%s': %s", job["id"], msg)
-            return msg
-        return None  # local-only jobs don't deliver — not a failure
-
     from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
+    from gateway.config import Platform
 
-    # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
-    try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
-
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
-        )
-    else:
-        delivery_content = content
-
-    # Extract MEDIA: tags so attachments are forwarded as files, not raw text
-    from gateway.platforms.base import BasePlatformAdapter
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-
-    try:
-        config = load_gateway_config()
-    except Exception as e:
-        msg = f"failed to load gateway config: {e}"
-        logger.error("Job '%s': %s", job["id"], msg)
-        return msg
-
-    delivery_errors = []
+    delivery_errors: List[str] = []
 
     for target in targets:
         platform_name = target["platform"]
@@ -719,7 +684,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             send_metadata = {"thread_id": thread_id} if thread_id else None
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
-                text_to_send = cleaned_delivery_content.strip()
+                text_to_send = text.strip()
                 adapter_ok = True
                 if text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
@@ -779,7 +744,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
         if not delivered:
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+            coro = _send_to_platform(platform, pconfig, chat_id, text, thread_id=thread_id, media_files=media_files)
             try:
                 result = asyncio.run(coro)
             except RuntimeError:
@@ -789,7 +754,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # fresh thread that has no running loop.
                 coro.close()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, text, thread_id=thread_id, media_files=media_files))
                     result = future.result(timeout=30)
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
@@ -804,6 +769,120 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+
+    return delivery_errors
+
+
+def _send_kickoff_ping(job: dict, adapters=None, loop=None) -> None:
+    """Post a lightweight "🔄 Started: <name>" ping the moment a job begins running.
+
+    Gives users immediate feedback before the (possibly slow) final result
+    arrives.  Reuses the same target resolution and low-level send path as the
+    final delivery, so it lands in the SAME thread, but skips the heavy
+    "Cronjob Response" envelope.
+
+    Non-fatal by contract: any failure is logged and swallowed so it can never
+    block ``run_job``.  Gated by ``cron.progress_pings`` (default true) and
+    silent for ``local``/empty deliver jobs.
+    """
+    try:
+        try:
+            enabled = load_config().get("cron", {}).get("progress_pings", True)
+        except Exception:
+            enabled = True
+        if not enabled:
+            return
+
+        # Only ping when the job actually delivers somewhere (mirror _deliver_result).
+        targets = _resolve_delivery_targets(job)
+        if not targets:
+            return
+
+        task_name = job.get("name", job.get("id", "job"))
+        schedule = (job.get("schedule_display") or "").strip()
+        text = f"🔄 Started: {task_name}"
+        if schedule:
+            text += f" ({schedule})"
+
+        from gateway.config import load_gateway_config
+        try:
+            config = load_gateway_config()
+        except Exception as e:
+            logger.warning(
+                "Job '%s': kickoff ping skipped, gateway config load failed: %s",
+                job.get("id", "?"), e,
+            )
+            return
+
+        errors = _send_to_targets(job, targets, text, [], config, adapters=adapters, loop=loop)
+        if errors:
+            logger.warning(
+                "Job '%s': kickoff ping had delivery errors: %s",
+                job.get("id", "?"), "; ".join(errors),
+            )
+    except Exception as e:
+        logger.warning("Job '%s': kickoff ping failed (non-fatal): %s", job.get("id", "?"), e)
+
+
+def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+    """
+    Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
+
+    When ``adapters`` and ``loop`` are provided (gateway is running), tries to
+    use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
+    the standalone HTTP path cannot encrypt.  Falls back to standalone send if
+    the adapter path fails or is unavailable.
+
+    Returns None on success, or an error string on failure.
+    """
+    targets = _resolve_delivery_targets(job)
+    if not targets:
+        if job.get("deliver", "local") != "local":
+            msg = f"no delivery target resolved for deliver={job.get('deliver', 'local')}"
+            logger.warning("Job '%s': %s", job["id"], msg)
+            return msg
+        return None  # local-only jobs don't deliver — not a failure
+
+    from gateway.config import load_gateway_config
+
+    # Optionally wrap the content with a header/footer so the user knows this
+    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
+    # in config.yaml for clean output.
+    wrap_response = True
+    try:
+        user_cfg = load_config()
+        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+    except Exception:
+        pass
+
+    if wrap_response:
+        task_name = job.get("name", job["id"])
+        job_id = job.get("id", "")
+        delivery_content = (
+            f"Cronjob Response: {task_name}\n"
+            f"(job_id: {job_id})\n"
+            f"-------------\n\n"
+            f"{content}\n\n"
+            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+        )
+    else:
+        delivery_content = content
+
+    # Extract MEDIA: tags so attachments are forwarded as files, not raw text
+    from gateway.platforms.base import BasePlatformAdapter
+    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+    try:
+        config = load_gateway_config()
+    except Exception as e:
+        msg = f"failed to load gateway config: {e}"
+        logger.error("Job '%s': %s", job["id"], msg)
+        return msg
+
+    delivery_errors = _send_to_targets(
+        job, targets, cleaned_delivery_content, media_files, config, adapters=adapters, loop=loop,
+    )
 
     if delivery_errors:
         return "; ".join(delivery_errors)
@@ -1939,6 +2018,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             try:
+                # Post a lightweight kickoff ping so users get immediate feedback
+                # before the (possibly slow) final result arrives. Non-fatal:
+                # a ping failure must never block the actual job run.
+                try:
+                    _send_kickoff_ping(job, adapters=adapters, loop=loop)
+                except Exception as ke:
+                    logger.warning("Job '%s': kickoff ping raised (non-fatal): %s", job.get("id", "?"), ke)
+
                 success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)
