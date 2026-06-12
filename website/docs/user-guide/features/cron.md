@@ -327,6 +327,18 @@ cron:
   wrap_response: false
 ```
 
+### Kickoff ping
+
+When a job starts running, Hermes posts a lightweight `🔄 Started: <job name>` line to the same delivery target as the final result. This gives immediate feedback for slow jobs instead of leaving you waiting in silence until the result arrives. The kickoff is a single line (no `Cronjob Response` envelope), only fires for jobs that deliver somewhere (`local`-only jobs stay silent), and never blocks the run if it fails.
+
+It is on by default. To disable it, set `cron.progress_pings` to `false`:
+
+```yaml
+# ~/.hermes/config.yaml
+cron:
+  progress_pings: false
+```
+
 ### Silent suppression
 
 If the agent's final response starts with `[SILENT]`, delivery is suppressed entirely. The output is still saved locally for audit (in `~/.hermes/cron/output/`), but no message is sent to the delivery target.
