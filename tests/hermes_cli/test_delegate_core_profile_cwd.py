@@ -225,3 +225,50 @@ def test_run_delegate_agent_stateless_without_resume():
             p.stop()
 
     assert _FakeAgent.last_kwargs.get("conversation_history") is None
+
+
+def test_bounded_resume_history_small_input_untouched():
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    assert delegate_core._bounded_resume_history(msgs, budget=1000) == msgs
+
+
+def test_bounded_resume_history_zero_budget_disables_bounding():
+    msgs = [{"role": "user", "content": "x" * 10_000}]
+    assert delegate_core._bounded_resume_history(msgs, budget=0) == msgs
+
+
+def test_bounded_resume_history_trims_to_budget_and_user_boundary():
+    # Old, large turns that must be dropped; a recent pair that fits the budget.
+    msgs = [
+        {"role": "user", "content": "OLD" * 1000},        # ~3000 chars, dropped
+        {"role": "assistant", "content": "OLD" * 1000},   # dropped
+        {"role": "user", "content": "recent question"},
+        {"role": "assistant", "content": "recent answer"},
+    ]
+    out = delegate_core._bounded_resume_history(msgs, budget=200)
+    # Only the recent pair survives, and the window opens on a user turn.
+    assert out == [
+        {"role": "user", "content": "recent question"},
+        {"role": "assistant", "content": "recent answer"},
+    ]
+    assert out[0]["role"] == "user"
+
+
+def test_bounded_resume_history_front_trim_drops_orphan_tool_result():
+    # A budget that would otherwise open the window on a tool result (no matching
+    # assistant tool_calls in-window) must be trimmed to the next user turn.
+    msgs = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": "result"},
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    out = delegate_core._bounded_resume_history(msgs, budget=40)
+    # Window must not start on the orphan tool row.
+    assert out[0]["role"] in {"user", "assistant"}
+    assert all(
+        not (i == 0 and m.get("role") == "tool") for i, m in enumerate(out)
+    )
