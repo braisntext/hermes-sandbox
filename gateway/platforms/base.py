@@ -4062,6 +4062,10 @@ class BasePlatformAdapter(ABC):
                         event.text,
                         _auto_profile,
                         no_delegate_prompt=True,
+                        # session_key encodes chat+thread, so the profile
+                        # subprocess rehydrates this topic's own transcript and
+                        # stays stateful across turns (fixes per-topic amnesia).
+                        resume_history=True,
                     ),
                 )
                 if _profile_result.get("error"):

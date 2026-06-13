@@ -34,8 +34,15 @@ def main() -> int:
     no_prompt = bool(os.environ.get("HERMES_DELEGATE_NO_PROMPT", ""))
     system_prompt_kwarg = {"ephemeral_system_prompt": None} if no_prompt else {}
 
+    # Standing conversational lanes (profile-bound Telegram topics) set this so
+    # the agent rehydrates the per-thread transcript instead of starting empty
+    # each turn. One-shot orchestrator delegations leave it unset (stateless).
+    resume_history = bool(os.environ.get("HERMES_DELEGATE_RESUME", ""))
+
     try:
-        result = run_delegate_agent(task_id, prompt, **system_prompt_kwarg)
+        result = run_delegate_agent(
+            task_id, prompt, resume_history=resume_history, **system_prompt_kwarg
+        )
         out = {
             "final_response": result.get("final_response", ""),
             "error": result.get("error"),
