@@ -37,6 +37,57 @@ RESULT_SUFFIX = "<<<END_HERMES_DELEGATE_RESULT>>>"
 # Default wall-clock timeout (seconds) for a profile-scoped delegate subprocess.
 _DEFAULT_DELEGATE_TIMEOUT = int(os.environ.get("HERMES_DELEGATE_TIMEOUT", "1800"))
 
+# Character budget for the resume-history window (~4 chars/token, so the default
+# is roughly 20K tokens). A long-lived topic accumulates a huge transcript — a
+# finview topic reached 669 messages / ~277K tokens — and replaying all of it on
+# every turn sends a ~440K-token request that is slow and burns the (often
+# rate-limited) model's capacity, starving other threads. A recent window is
+# enough to carry the thread's focus and the immediately-prior proposed task
+# across turns. Set to 0 to disable bounding (replay everything). Overridable via
+# HERMES_DELEGATE_RESUME_CHARS so prod can tune without a redeploy.
+_RESUME_HISTORY_CHAR_BUDGET = int(
+    os.environ.get("HERMES_DELEGATE_RESUME_CHARS", "80000")
+)
+
+
+def _bounded_resume_history(
+    messages: Optional[list], budget: int = _RESUME_HISTORY_CHAR_BUDGET
+) -> Optional[list]:
+    """Return a recent, replay-safe tail of *messages* within *budget* chars.
+
+    Keeps the most recent messages up to the budget, then trims the front to a
+    clean turn boundary so the slice never starts on an orphan ``tool`` result
+    or a dangling assistant ``tool_calls`` (both of which the API rejects). A
+    ``budget`` of 0 (or empty input) returns the messages unchanged.
+    """
+    if not messages or budget <= 0:
+        return messages
+
+    kept: list = []
+    total = 0
+    for msg in reversed(messages):
+        size = len(str(msg.get("content") or ""))
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            size += len(str(tool_calls))
+        # Always keep at least the most recent message, even if it alone exceeds
+        # the budget, so the current turn still has its immediate predecessor.
+        if kept and total + size > budget:
+            break
+        kept.append(msg)
+        total += size
+    kept.reverse()
+
+    # Front must be a safe opening message. Prefer the first user turn; fall
+    # back to the first assistant message that has no pending tool_calls.
+    for i, msg in enumerate(kept):
+        if msg.get("role") == "user":
+            return kept[i:]
+    for i, msg in enumerate(kept):
+        if msg.get("role") == "assistant" and not msg.get("tool_calls"):
+            return kept[i:]
+    return kept
+
 
 DELEGATE_SYSTEM_PROMPT = (
     "You are executing a delegated task from an external orchestrator (BigLobster). "
@@ -72,7 +123,9 @@ def run_delegate_agent(
     orchestrator tasks (unique ``task_id`` each call), but it makes a *standing*
     conversational lane (Telegram forum topic bound to a profile) amnesiac
     turn-to-turn. The transcript is already persisted under ``task_id`` (=the
-    gateway session key, per chat+thread); this just reads it back.
+    gateway session key, per chat+thread); this just reads it back, bounded to a
+    recent window (see ``_bounded_resume_history``) so a huge backlog doesn't
+    inflate every request.
     """
     from run_agent import AIAgent
     from hermes_cli.config import load_config
@@ -125,7 +178,15 @@ def run_delegate_agent(
     conversation_history = None
     if resume_history and session_db is not None and task_id:
         try:
-            conversation_history = session_db.get_messages_as_conversation(task_id)
+            full_history = session_db.get_messages_as_conversation(task_id)
+            conversation_history = _bounded_resume_history(full_history)
+            if full_history and conversation_history is not None:
+                logger.info(
+                    "Delegate: resumed %d/%d prior messages for task_id=%s "
+                    "(char budget=%d)",
+                    len(conversation_history), len(full_history), task_id,
+                    _RESUME_HISTORY_CHAR_BUDGET,
+                )
         except Exception:
             logger.warning(
                 "Delegate: failed to rehydrate history for task_id=%s; "
