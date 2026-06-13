@@ -120,3 +120,108 @@ def test_auto_profile_field_on_message_event():
 
     ev2 = MessageEvent(text="hello", auto_profile="grow-shop")
     assert ev2.auto_profile == "grow-shop"
+
+
+def test_resume_history_sets_env_var(tmp_path):
+    """resume_history=True must inject HERMES_DELEGATE_RESUME=1 into the subprocess env."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile(
+            "task-1", "do it", "finview", resume_history=True
+        )
+
+    assert captured["env"].get("HERMES_DELEGATE_RESUME") == "1"
+
+
+def test_resume_history_absent_by_default(tmp_path):
+    """Without resume_history the env var must NOT be set (one-shot delegations stay stateless)."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert "HERMES_DELEGATE_RESUME" not in captured["env"]
+
+
+class _FakeSessionDB:
+    def __init__(self, history):
+        self._history = history
+
+    def get_messages_as_conversation(self, session_id):
+        # Echo the session_id so the test can assert we loaded by the right key.
+        return [{"role": "assistant", "content": f"prior for {session_id}"}] \
+            if self._history else []
+
+
+class _FakeAgent:
+    last_kwargs: dict = {}
+
+    def __init__(self, **kwargs):
+        pass
+
+    def run_conversation(self, **kwargs):
+        _FakeAgent.last_kwargs = kwargs
+        return {"final_response": "ok", "error": None}
+
+
+def _patch_agent_runtime(session_db):
+    """Patch the heavy deps of run_delegate_agent so it runs as a pure unit."""
+    return [
+        patch("hermes_cli.config.load_config", return_value={"model": "x/y"}),
+        patch("hermes_state.SessionDB", return_value=session_db),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+              side_effect=Exception("skip runtime resolution")),
+        patch("run_agent.AIAgent", _FakeAgent),
+    ]
+
+
+def test_run_delegate_agent_rehydrates_when_resume():
+    """resume_history=True loads the per-task transcript and passes it as conversation_history."""
+    fake_db = _FakeSessionDB(history=True)
+    patches = _patch_agent_runtime(fake_db)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent(
+            "agent:main:telegram:group:-100:61", "sí, hazlo", resume_history=True
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+    history = _FakeAgent.last_kwargs.get("conversation_history")
+    assert history == [
+        {"role": "assistant", "content": "prior for agent:main:telegram:group:-100:61"}
+    ]
+
+
+def test_run_delegate_agent_stateless_without_resume():
+    """Without resume_history the agent starts with no conversation_history (one-shot lane)."""
+    fake_db = _FakeSessionDB(history=True)
+    patches = _patch_agent_runtime(fake_db)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("one-shot-task", "do it")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert _FakeAgent.last_kwargs.get("conversation_history") is None

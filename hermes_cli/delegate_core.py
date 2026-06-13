@@ -55,6 +55,7 @@ def run_delegate_agent(
     task_id: str,
     prompt: str,
     ephemeral_system_prompt: Optional[str] = DELEGATE_SYSTEM_PROMPT,
+    resume_history: bool = False,
 ) -> dict:
     """Synchronous agent runner.
 
@@ -63,6 +64,15 @@ def run_delegate_agent(
 
     Pass ``ephemeral_system_prompt=None`` to let the profile's own soul take over
     (used by the Telegram gateway path, which needs the native profile persona).
+
+    Pass ``resume_history=True`` to rehydrate the prior conversation for
+    ``task_id`` from the profile's session DB before running. Each delegate call
+    spawns a fresh agent, so without this the conversation starts empty every
+    turn and the agent cannot see its own prior turns — fine for one-shot
+    orchestrator tasks (unique ``task_id`` each call), but it makes a *standing*
+    conversational lane (Telegram forum topic bound to a profile) amnesiac
+    turn-to-turn. The transcript is already persisted under ``task_id`` (=the
+    gateway session key, per chat+thread); this just reads it back.
     """
     from run_agent import AIAgent
     from hermes_cli.config import load_config
@@ -108,8 +118,27 @@ def run_delegate_agent(
     except Exception:
         logger.debug("Delegate falling back to default provider resolution", exc_info=True)
 
+    # Rehydrate the prior conversation for this task_id so a standing
+    # conversational lane (e.g. a profile-bound Telegram topic) remembers
+    # earlier turns. Loaded by the exact session_id, so no cross-thread or
+    # cross-profile bleed. Empty/missing history is a no-op (genuine first turn).
+    conversation_history = None
+    if resume_history and session_db is not None and task_id:
+        try:
+            conversation_history = session_db.get_messages_as_conversation(task_id)
+        except Exception:
+            logger.warning(
+                "Delegate: failed to rehydrate history for task_id=%s; "
+                "starting fresh", task_id, exc_info=True,
+            )
+            conversation_history = None
+
     agent = AIAgent(**kwargs)
-    return agent.run_conversation(user_message=prompt, task_id=task_id)
+    return agent.run_conversation(
+        user_message=prompt,
+        conversation_history=conversation_history,
+        task_id=task_id,
+    )
 
 
 def run_delegate_in_profile(
@@ -118,6 +147,7 @@ def run_delegate_in_profile(
     profile: str,
     *,
     no_delegate_prompt: bool = False,
+    resume_history: bool = False,
 ) -> dict:
     """Run a delegated task inside *profile*'s ``HERMES_HOME``, in a subprocess.
 
@@ -127,6 +157,11 @@ def run_delegate_in_profile(
 
     Pass ``no_delegate_prompt=True`` for the Telegram gateway path: the subprocess
     will skip the ``DELEGATE_SYSTEM_PROMPT`` and use the profile's own soul instead.
+
+    Pass ``resume_history=True`` to make the subprocess rehydrate the prior
+    conversation for ``task_id`` (per chat+thread) before running — used by the
+    Telegram topic lane so a profile-bound thread is stateful across turns. Left
+    off for one-shot orchestrator delegations, which must stay stateless.
     """
     from hermes_cli import profiles as profiles_mod
 
@@ -138,6 +173,8 @@ def run_delegate_in_profile(
     env = {**os.environ, "HERMES_HOME": profile_home}
     if no_delegate_prompt:
         env["HERMES_DELEGATE_NO_PROMPT"] = "1"
+    if resume_history:
+        env["HERMES_DELEGATE_RESUME"] = "1"
 
     # Scope the subprocess's working directory to the profile's own workspace.
     # Without this the subprocess inherits the web-server process's cwd (the
