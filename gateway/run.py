@@ -18093,6 +18093,19 @@ class GatewayRunner:
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
 
+            # If this turn fell back to the configured backup model because the
+            # primary was rate-limited, append a one-line notice so the user
+            # knows a different model answered. The chain's own "switching..."
+            # status is buffered and dropped on success, so surface it here.
+            if final_response:
+                try:
+                    from agent.chat_completion_helpers import fallback_switch_notice
+                    _fb_notice = fallback_switch_notice(agent_holder[0] or agent)
+                    if _fb_notice:
+                        final_response = f"{str(final_response).rstrip()}\n\n{_fb_notice}"
+                except Exception:
+                    logger.debug("Gateway: fallback notice append failed", exc_info=True)
+
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
             _input_toks = 0

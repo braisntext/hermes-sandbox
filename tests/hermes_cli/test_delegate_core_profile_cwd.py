@@ -172,19 +172,25 @@ class _FakeSessionDB:
 
 class _FakeAgent:
     last_kwargs: dict = {}
+    last_init_kwargs: dict = {}
 
     def __init__(self, **kwargs):
-        pass
+        _FakeAgent.last_init_kwargs = kwargs
+        # Default: no fallback used this turn (notice helper returns "").
+        self._fallback_index = 0
+        self._primary_runtime = {"model": kwargs.get("model")}
+        self.model = kwargs.get("model")
 
     def run_conversation(self, **kwargs):
         _FakeAgent.last_kwargs = kwargs
         return {"final_response": "ok", "error": None}
 
 
-def _patch_agent_runtime(session_db):
+def _patch_agent_runtime(session_db, config=None):
     """Patch the heavy deps of run_delegate_agent so it runs as a pure unit."""
     return [
-        patch("hermes_cli.config.load_config", return_value={"model": "x/y"}),
+        patch("hermes_cli.config.load_config",
+              return_value=config if config is not None else {"model": "x/y"}),
         patch("hermes_state.SessionDB", return_value=session_db),
         patch("hermes_cli.runtime_provider.resolve_runtime_provider",
               side_effect=Exception("skip runtime resolution")),
@@ -272,3 +278,88 @@ def test_bounded_resume_history_front_trim_drops_orphan_tool_result():
     assert all(
         not (i == 0 and m.get("role") == "tool") for i, m in enumerate(out)
     )
+
+
+def test_delegate_passes_fallback_model_from_config():
+    """A configured fallback_model must be forwarded to the agent in the delegate lane."""
+    fb = {"provider": "openrouter", "model": "tencent/hy3-preview"}
+    cfg = {"model": "openrouter/owl-alpha", "fallback_model": fb}
+    patches = _patch_agent_runtime(_FakeSessionDB(history=False), config=cfg)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("t", "hi")
+    finally:
+        for p in patches:
+            p.stop()
+    assert _FakeAgent.last_init_kwargs.get("fallback_model") == fb
+
+
+def test_delegate_omits_fallback_model_when_absent():
+    """Without fallback_model in config the agent kwarg must not be set."""
+    patches = _patch_agent_runtime(_FakeSessionDB(history=False), config={"model": "m"})
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("t", "hi")
+    finally:
+        for p in patches:
+            p.stop()
+    assert "fallback_model" not in _FakeAgent.last_init_kwargs
+
+
+def test_fallback_switch_notice():
+    from agent.chat_completion_helpers import fallback_switch_notice
+    from types import SimpleNamespace
+
+    # No fallback used → empty notice.
+    assert fallback_switch_notice(
+        SimpleNamespace(_fallback_index=0, _primary_runtime={"model": "p"}, model="p")
+    ) == ""
+
+    # Fallback used → names primary and current model.
+    notice = fallback_switch_notice(
+        SimpleNamespace(
+            _fallback_index=1,
+            _primary_runtime={"model": "openrouter/owl-alpha"},
+            model="tencent/hy3-preview",
+        )
+    )
+    assert "owl-alpha" in notice and "tencent/hy3-preview" in notice
+    assert notice.startswith("ℹ️")
+
+    # Index advanced but model unchanged (deduped chain) → no false notice.
+    assert fallback_switch_notice(
+        SimpleNamespace(_fallback_index=1, _primary_runtime={"model": "m"}, model="m")
+    ) == ""
+
+
+def test_delegate_appends_fallback_notice_to_reply():
+    """When the agent ends on a fallback model, the delegate reply carries the notice."""
+    class _FallbackAgent(_FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._fallback_index = 1
+            self._primary_runtime = {"model": "openrouter/owl-alpha"}
+            self.model = "tencent/hy3-preview"
+
+        def run_conversation(self, **kwargs):
+            return {"final_response": "respuesta", "error": None}
+
+    patches = [
+        patch("hermes_cli.config.load_config",
+              return_value={"model": "openrouter/owl-alpha"}),
+        patch("hermes_state.SessionDB", return_value=_FakeSessionDB(history=False)),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+              side_effect=Exception("skip")),
+        patch("run_agent.AIAgent", _FallbackAgent),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        result = delegate_core.run_delegate_agent("t", "hola")
+    finally:
+        for p in patches:
+            p.stop()
+    assert result["final_response"].startswith("respuesta")
+    assert "tencent/hy3-preview" in result["final_response"]

@@ -156,6 +156,12 @@ def run_delegate_agent(
         "session_db": session_db,
         "ephemeral_system_prompt": ephemeral_system_prompt,
     }
+    # Wire the configured fallback model so a profile-routed topic fails over
+    # when its primary model is rate-limited (the in-process gateway lane already
+    # loads this from config; the delegate subprocess must do it explicitly).
+    fallback_model = config.get("fallback_model")
+    if fallback_model:
+        kwargs["fallback_model"] = fallback_model
     try:
         runtime = resolve_runtime_provider(requested=config_provider)
         kwargs.update(
@@ -195,11 +201,25 @@ def run_delegate_agent(
             conversation_history = None
 
     agent = AIAgent(**kwargs)
-    return agent.run_conversation(
+    result = agent.run_conversation(
         user_message=prompt,
         conversation_history=conversation_history,
         task_id=task_id,
     )
+
+    # If the turn fell back to the configured backup model (primary rate-limited),
+    # tell the user — the delegate subprocess has no live status channel, so the
+    # notice rides along on the reply itself.
+    try:
+        from agent.chat_completion_helpers import fallback_switch_notice
+        notice = fallback_switch_notice(agent)
+        if notice:
+            body = str(result.get("final_response") or "").rstrip()
+            result["final_response"] = f"{body}\n\n{notice}" if body else notice
+    except Exception:
+        logger.debug("Delegate: fallback notice append failed", exc_info=True)
+
+    return result
 
 
 def run_delegate_in_profile(

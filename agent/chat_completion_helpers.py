@@ -1002,6 +1002,31 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
 
 
+def fallback_switch_notice(agent) -> str:
+    """One-line Spanish notice when this turn's reply came from a fallback model.
+
+    Returns ``""`` when the turn ran entirely on the primary model, so callers
+    can append it unconditionally. The retry/fallback chain normally buffers its
+    "switching to fallback" status and *drops it on success*; gateway lanes want
+    the opposite — to always tell the user a backup model answered because the
+    primary was rate-limited. Appended to the final reply by the gateway entry
+    points (in-process and profile-delegate).
+    """
+    try:
+        if getattr(agent, "_fallback_index", 0) <= 0:
+            return ""
+        primary = (getattr(agent, "_primary_runtime", None) or {}).get("model") or "principal"
+        current = getattr(agent, "model", None) or "respaldo"
+        if str(current).strip() == str(primary).strip():
+            return ""
+        return (
+            f"ℹ️ Modelo principal saturado ({primary}) — "
+            f"esta respuesta usa el modelo de respaldo: {current}."
+        )
+    except Exception:
+        return ""
+
+
 def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
     """Switch to the next fallback model/provider in the chain.
 
