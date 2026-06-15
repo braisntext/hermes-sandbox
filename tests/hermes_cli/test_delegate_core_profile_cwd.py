@@ -179,6 +179,53 @@ def test_delegate_env_sources_token_from_git_credentials(tmp_path, monkeypatch):
     assert captured["env"]["GH_TOKEN"] == "ghp_ondiskTOKEN"
 
 
+def test_delegate_writes_gh_hosts_yml_from_credentials(tmp_path, monkeypatch):
+    """The env-token path is stripped by the subprocess blocklist, so gh must
+    auth from disk. The delegate must write <home>/.config/gh/hosts.yml with the
+    same token git uses, mode 600, even with nothing in env."""
+    import stat as _stat
+
+    profile_home = tmp_path / "profiles" / "finview"
+    home = profile_home / "home"
+    home.mkdir(parents=True)
+    (home / ".git-credentials").write_text(
+        "https://x-access-token:ghp_ondiskTOKEN@github.com\n"
+    )
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    def _fake_run(cmd, **kwargs):
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    hosts = home / ".config" / "gh" / "hosts.yml"
+    assert hosts.is_file()
+    body = hosts.read_text()
+    assert "github.com:" in body
+    assert "oauth_token: ghp_ondiskTOKEN" in body
+    assert _stat.S_IMODE(hosts.stat().st_mode) == 0o600
+
+
+def test_delegate_skips_gh_hosts_when_no_profile_home(tmp_path, monkeypatch):
+    """No <profile>/home dir → no place to write hosts.yml; must not crash and
+    must not create one outside the profile."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)  # no home/
+    monkeypatch.setenv("GH_TOKEN", "ghp_envonly")
+
+    def _fake_run(cmd, **kwargs):
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert not (profile_home / "home").exists()
+
+
 def test_delegate_env_credential_token_overrides_stale_env(tmp_path, monkeypatch):
     """The credential-file token (what git uses) wins over a stale inherited env
     value, so gh and git never disagree."""
