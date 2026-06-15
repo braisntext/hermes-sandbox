@@ -65,6 +65,65 @@ def test_cwd_falls_back_to_profile_root_if_workspace_uncreatable(tmp_path):
     assert captured["cwd"] == str(profile_home)
 
 
+class _KilledCompleted:
+    """A subprocess result reaped by a signal: negative returncode, no sentinel."""
+
+    def __init__(self, returncode: int):
+        self.stdout = "partial output, no sentinel"
+        self.stderr = ""
+        self.returncode = returncode
+
+
+def test_signal_kill_gateway_lane_returns_recoverable_message(tmp_path):
+    """A SIGTERM-killed delegate (exit=-15) on the gateway lane must yield a
+    friendly, recoverable reply instead of the cryptic 'no parseable result'."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", return_value=_KilledCompleted(-15)):
+        result = delegate_core.run_delegate_in_profile(
+            "task-1", "do it", "finview", no_delegate_prompt=True
+        )
+
+    # User-facing recoverable message (Spanish, matches the topic notices).
+    assert result["final_response"]
+    assert "interrumpió" in result["final_response"]
+    assert "no parseable result" not in result["final_response"]
+    # Diagnostic names the signal so logs can tell restart (SIGTERM) from OOM.
+    assert "SIGTERM" in result["error"]
+
+
+def test_signal_kill_orchestrator_lane_returns_diagnostic(tmp_path):
+    """The orchestrator lane (no gateway flag) gets an English diagnostic error
+    and an empty final_response, naming the signal."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", return_value=_KilledCompleted(-15)):
+        result = delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert result["final_response"] == ""
+    assert "SIGTERM" in result["error"]
+    assert "restart" in result["error"]
+
+
+def test_unparseable_nonsignal_exit_keeps_no_parseable_message(tmp_path):
+    """A non-signal failure (positive exit code) must still surface the original
+    'no parseable result' diagnostic with the tail — not the signal path."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", return_value=_KilledCompleted(1)):
+        result = delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert result["final_response"] == ""
+    assert "no parseable result" in result["error"]
+    assert "exit=1" in result["error"]
+
+
 def test_unknown_profile_returns_error_not_raise():
     with patch("hermes_cli.profiles.resolve_profile_env",
                side_effect=FileNotFoundError("nope")):
@@ -378,9 +437,11 @@ class _FakeSessionDB:
 class _FakeAgent:
     last_kwargs: dict = {}
     last_init_kwargs: dict = {}
+    last_instance = None
 
     def __init__(self, **kwargs):
         _FakeAgent.last_init_kwargs = kwargs
+        _FakeAgent.last_instance = self
         # Default: no fallback used this turn (notice helper returns "").
         self._fallback_index = 0
         self._primary_runtime = {"model": kwargs.get("model")}
@@ -511,6 +572,70 @@ def test_delegate_omits_fallback_model_when_absent():
         for p in patches:
             p.stop()
     assert "fallback_model" not in _FakeAgent.last_init_kwargs
+
+
+def test_interactive_lane_caps_api_max_retries_for_fast_failover():
+    """The standing interactive lane (resume_history + fallback) must cap the
+    retry-before-failover budget so a saturated primary fails over fast."""
+    fb = {"provider": "openrouter", "model": "tencent/hy3-preview"}
+    cfg = {"model": "openrouter/owl-alpha", "fallback_model": fb}
+    patches = _patch_agent_runtime(_FakeSessionDB(history=True), config=cfg)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("topic-task", "hi", resume_history=True)
+    finally:
+        for p in patches:
+            p.stop()
+    assert _FakeAgent.last_instance._api_max_retries == 1
+
+
+def test_oneshot_lane_leaves_retry_budget_untouched():
+    """A one-shot orchestrator delegation (no resume_history) must NOT have its
+    retry budget overridden — the default config value stands."""
+    fb = {"provider": "openrouter", "model": "tencent/hy3-preview"}
+    cfg = {"model": "openrouter/owl-alpha", "fallback_model": fb}
+    patches = _patch_agent_runtime(_FakeSessionDB(history=False), config=cfg)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("one-shot", "do it")
+    finally:
+        for p in patches:
+            p.stop()
+    # The override never ran, so the fake agent has no forced retry attribute.
+    assert not hasattr(_FakeAgent.last_instance, "_api_max_retries")
+
+
+def test_interactive_lane_without_fallback_keeps_retry_budget():
+    """No fallback configured → no override (capping retries with nowhere to
+    fail over to would just fail faster, not better)."""
+    cfg = {"model": "openrouter/owl-alpha"}
+    patches = _patch_agent_runtime(_FakeSessionDB(history=True), config=cfg)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("topic-task", "hi", resume_history=True)
+    finally:
+        for p in patches:
+            p.stop()
+    assert not hasattr(_FakeAgent.last_instance, "_api_max_retries")
+
+
+def test_interactive_lane_retry_cap_env_overridable(monkeypatch):
+    """HERMES_DELEGATE_INTERACTIVE_MAX_RETRIES lets prod tune the cap."""
+    monkeypatch.setenv("HERMES_DELEGATE_INTERACTIVE_MAX_RETRIES", "2")
+    fb = {"provider": "openrouter", "model": "tencent/hy3-preview"}
+    cfg = {"model": "openrouter/owl-alpha", "fallback_model": fb}
+    patches = _patch_agent_runtime(_FakeSessionDB(history=True), config=cfg)
+    for p in patches:
+        p.start()
+    try:
+        delegate_core.run_delegate_agent("topic-task", "hi", resume_history=True)
+    finally:
+        for p in patches:
+            p.stop()
+    assert _FakeAgent.last_instance._api_max_retries == 2
 
 
 def test_fallback_switch_notice():

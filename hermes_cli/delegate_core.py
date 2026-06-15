@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import uuid
@@ -201,6 +202,29 @@ def run_delegate_agent(
             conversation_history = None
 
     agent = AIAgent(**kwargs)
+
+    # Interactive topic lanes (a profile-bound Telegram thread, resume_history=
+    # True) must fail over FAST when the primary model is saturated. The default
+    # retry-before-failover budget (agent.api_max_retries, default 3) retries a
+    # slow/rate-limited free primary three times with backoff — tens of seconds
+    # to minutes — before the configured fallback is tried. A clean HTTP 429
+    # already fails over eagerly (see conversation_loop's is_rate_limited path),
+    # but capacity 5xx, stalled streams and timeouts go through the generic
+    # retry path and burn the full budget on a model that won't recover in the
+    # window. For a standing conversational lane that HAS a fallback wired, one
+    # failed primary attempt is enough signal to switch. Cap the budget (env-
+    # overridable) so interactive turns degrade in seconds, not minutes; the
+    # one-extra primary-transport recovery (try_recover_primary_transport) still
+    # covers genuine TCP blips. One-shot orchestrator delegations
+    # (resume_history=False) keep the full retry budget unchanged.
+    if resume_history and fallback_model:
+        try:
+            agent._api_max_retries = max(
+                1, int(os.environ.get("HERMES_DELEGATE_INTERACTIVE_MAX_RETRIES", "1"))
+            )
+        except (TypeError, ValueError):
+            agent._api_max_retries = 1
+
     result = agent.run_conversation(
         user_message=prompt,
         conversation_history=conversation_history,
@@ -409,6 +433,12 @@ def run_delegate_in_profile(
 
     result = _parse_runner_output(proc.stdout)
     if result is None:
+        # A negative returncode means the child was killed by a signal rather
+        # than exiting on its own (no sentinel was ever printed). Surface a
+        # clear, recoverable message instead of the cryptic "no parseable
+        # result" dump — see _signal_kill_result for the SIGTERM-vs-OOM detail.
+        if proc.returncode is not None and proc.returncode < 0:
+            return _signal_kill_result(proc.returncode, profile, no_delegate_prompt)
         tail = (proc.stderr or proc.stdout or "")[-500:]
         return {
             "final_response": "",
@@ -418,6 +448,50 @@ def run_delegate_in_profile(
             ),
         }
     return result
+
+
+_SIGNAL_NAMES: Dict[int, str] = {
+    int(_s): _name
+    for _name in ("SIGTERM", "SIGKILL", "SIGINT", "SIGHUP", "SIGABRT", "SIGSEGV")
+    if (_s := getattr(signal, _name, None)) is not None
+}
+
+
+def _signal_kill_result(returncode: int, profile: str, gateway_lane: bool) -> dict:
+    """Build a graceful result for a subprocess killed by a signal.
+
+    ``returncode`` is negative (``-signum``) when the child was terminated by a
+    signal rather than exiting on its own. The dominant prod case is SIGTERM
+    (-15): the delegate subprocess shares the gateway's process group (it is
+    spawned without ``start_new_session``), so when the gateway is recycled
+    mid-run — Zeabur redeploy, container/supervisor restart, or the gateway's
+    own shutdown drain — the in-flight child is reaped with SIGTERM. A saturated
+    free primary model makes turns take minutes, so that in-flight window is
+    wide and restarts frequently catch a delegate here. (OOM is distinguishable:
+    the kernel OOM killer uses SIGKILL/-9, not -15.)
+
+    Returns a user-facing, recoverable message for the interactive gateway lane
+    (``gateway_lane``, which speaks to Spanish-facing Telegram topics) and a
+    diagnostic English ``error`` for the orchestrator lane. Either way the
+    ``error`` names the signal so logs can tell a restart (SIGTERM) from an OOM
+    (SIGKILL).
+    """
+    signum = -returncode
+    name = _SIGNAL_NAMES.get(signum, f"signal {signum}")
+    diagnostic = (
+        f"Delegate subprocess terminated by {name} "
+        f"(likely a gateway restart/redeploy mid-task), profile {profile!r}"
+    )
+    if gateway_lane:
+        # Spanish to match the profile topics' user-facing notices. Non-empty
+        # final_response so the gateway delivers it as the reply; error rides
+        # along for the logs.
+        msg = (
+            "⚠️ La respuesta se interrumpió porque el servicio se reinició a "
+            "mitad de la tarea. Vuelve a enviarme el mensaje y lo retomo."
+        )
+        return {"final_response": msg, "error": diagnostic}
+    return {"final_response": "", "error": diagnostic}
 
 
 def _parse_runner_output(stdout: str) -> Optional[dict]:
