@@ -152,13 +152,17 @@ def test_delegate_env_leaves_home_unset_when_no_profile_home(tmp_path, monkeypat
     assert captured["env"]["HOME"] != str(profile_home / "home")
 
 
-def test_delegate_env_mirrors_github_token_to_gh_token(tmp_path, monkeypatch):
-    """gh accepts GH_TOKEN or GITHUB_TOKEN, but the subprocess blocklist strips
-    GH_TOKEN and keeps GITHUB_TOKEN. With only GITHUB_TOKEN set, both must be
-    present so gh authenticates off the surviving var."""
+def test_delegate_env_sources_token_from_git_credentials(tmp_path, monkeypatch):
+    """The Zeabur gateway/delegate env carries NO token; the only live token is
+    on disk in <profile>/home/.git-credentials. gh must get that exact token,
+    exported as both GITHUB_TOKEN and GH_TOKEN, even with nothing in env."""
     profile_home = tmp_path / "profiles" / "finview"
-    profile_home.mkdir(parents=True)
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
+    home = profile_home / "home"
+    home.mkdir(parents=True)
+    (home / ".git-credentials").write_text(
+        "https://x-access-token:ghp_ondiskTOKEN@github.com\n"
+    )
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
     captured: dict = {}
@@ -171,15 +175,40 @@ def test_delegate_env_mirrors_github_token_to_gh_token(tmp_path, monkeypatch):
             patch("subprocess.run", _fake_run):
         delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
 
-    assert captured["env"]["GITHUB_TOKEN"] == "ghp_from_env"
-    assert captured["env"]["GH_TOKEN"] == "ghp_from_env"
+    assert captured["env"]["GITHUB_TOKEN"] == "ghp_ondiskTOKEN"
+    assert captured["env"]["GH_TOKEN"] == "ghp_ondiskTOKEN"
 
 
-def test_delegate_env_mirrors_gh_token_to_github_token(tmp_path, monkeypatch):
-    """The reverse: when only GH_TOKEN is set upstream, GITHUB_TOKEN (the var that
-    survives the subprocess env blocklist) must be populated from it."""
+def test_delegate_env_credential_token_overrides_stale_env(tmp_path, monkeypatch):
+    """The credential-file token (what git uses) wins over a stale inherited env
+    value, so gh and git never disagree."""
     profile_home = tmp_path / "profiles" / "finview"
-    profile_home.mkdir(parents=True)
+    home = profile_home / "home"
+    home.mkdir(parents=True)
+    (home / ".git-credentials").write_text(
+        "https://x-access-token:ghp_fresh@github.com\n"
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_stale")
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert captured["env"]["GITHUB_TOKEN"] == "ghp_fresh"
+    assert captured["env"]["GH_TOKEN"] == "ghp_fresh"
+
+
+def test_delegate_env_mirrors_env_token_when_no_credential_file(tmp_path, monkeypatch):
+    """No <profile>/home credential file → fall back to mirroring whatever token
+    is in the env (GH_TOKEN→GITHUB_TOKEN, the var that survives the blocklist)."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)  # no home/ → no credential file
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setenv("GH_TOKEN", "ghp_only_gh")
 
@@ -198,7 +227,7 @@ def test_delegate_env_mirrors_gh_token_to_github_token(tmp_path, monkeypatch):
 
 
 def test_delegate_env_does_not_invent_token_when_absent(tmp_path, monkeypatch):
-    """No token in the parent env → neither var is fabricated (no empty creds)."""
+    """No credential file and no env token → neither var is fabricated."""
     profile_home = tmp_path / "profiles" / "finview"
     profile_home.mkdir(parents=True)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -216,6 +245,28 @@ def test_delegate_env_does_not_invent_token_when_absent(tmp_path, monkeypatch):
 
     assert "GITHUB_TOKEN" not in captured["env"]
     assert "GH_TOKEN" not in captured["env"]
+
+
+def test_token_from_git_credentials_parses_forms(tmp_path):
+    """Parser handles x-access-token, user:token, and user-less token forms; and
+    ignores non-github lines."""
+    p = tmp_path / ".git-credentials"
+    p.write_text(
+        "https://gitlab.com:somethingelse@gitlab.com\n"
+        "https://x-access-token:ghp_xat@github.com\n"
+    )
+    assert delegate_core._token_from_git_credentials(str(p)) == "ghp_xat"
+
+    p.write_text("https://ghp_bareToken@github.com\n")
+    assert delegate_core._token_from_git_credentials(str(p)) == "ghp_bareToken"
+
+    p.write_text("https://someuser:ghp_userpw@github.com\n")
+    assert delegate_core._token_from_git_credentials(str(p)) == "ghp_userpw"
+
+    # Missing file / no github entry → None.
+    assert delegate_core._token_from_git_credentials(str(tmp_path / "nope")) is None
+    p.write_text("https://x-access-token:tok@gitlab.com\n")
+    assert delegate_core._token_from_git_credentials(str(p)) is None
 
 
 def test_auto_profile_field_on_message_event():

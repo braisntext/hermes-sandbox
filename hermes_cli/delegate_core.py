@@ -222,14 +222,47 @@ def run_delegate_agent(
     return result
 
 
+def _token_from_git_credentials(creds_path: str) -> Optional[str]:
+    """Extract the GitHub token from a ``.git-credentials`` line, or None.
+
+    The boot hook writes ``https://x-access-token:<TOKEN>@github.com`` (see
+    ``docker/cont-init.d/03-biglobster-config`` §4). Parse the password
+    component out of the first github.com entry. Tolerates the user-less form
+    ``https://<TOKEN>@github.com`` too. Never raises — a missing/garbled file
+    just yields None and the caller falls back to the ambient env.
+    """
+    try:
+        with open(creds_path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if "github.com" not in line:
+            continue
+        userinfo, sep, _host = line.rpartition("@")
+        if not sep:
+            continue
+        userinfo = userinfo.split("://", 1)[-1]  # strip scheme
+        token = userinfo.rpartition(":")[2].strip()  # password after [user:]
+        if token:
+            return token
+    return None
+
+
 def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
     """Make the delegate subprocess able to ``git push`` / ``gh pr create`` with
     ambient credentials, identical to the default/cron lane.
 
     The interactive profile-delegate lane previously inherited only the gateway
-    process's ``HOME`` (the *default* profile's), so git/gh in a tenant topic
-    used the wrong credential store — or none — and the agent ended up asking
-    the user to paste a raw token. Two fixes, both in-place on *env*:
+    process's ``HOME`` (the *default* profile's) and — critically — **no GitHub
+    token in its environment** (the Zeabur gateway service env carries neither
+    ``GITHUB_TOKEN`` nor ``GH_TOKEN``; the token lives only on disk in the
+    profile's ``.git-credentials`` and in the agent's prompt). So ``git push``
+    could still work off the credential file, but ``gh`` — which reads the token
+    from the environment, not ``.git-credentials`` — had nothing to authenticate
+    with, and the agent fell back to begging the user for a raw token. Two
+    fixes, both in-place on *env*:
 
     * **HOME pin.** When ``<profile_home>/home`` exists (the per-profile
       subprocess HOME that the container boot hook populates with
@@ -241,21 +274,35 @@ def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
       lane on an empty HOME: if the dir is absent we leave HOME untouched and
       the existing fallback (the gateway's credentialed HOME) stands.
 
-    * **Token mirror.** ``gh`` accepts ``GH_TOKEN`` *or* ``GITHUB_TOKEN``, but
-      the subprocess env blocklist strips ``GH_TOKEN`` while letting
-      ``GITHUB_TOKEN`` through (see ``_HERMES_PROVIDER_ENV_BLOCKLIST``). Mirror
-      whichever is present onto the other so the surviving var (``GITHUB_TOKEN``)
-      is always populated for ``gh``, and in-process consumers that read
-      ``GH_TOKEN`` still work.
+    * **Token export.** Give ``gh`` the *same* token ``git`` already uses by
+      reading it out of the profile's ``.git-credentials`` and exporting it as
+      both ``GITHUB_TOKEN`` and ``GH_TOKEN``. ``gh`` accepts either, but the
+      subprocess env blocklist strips ``GH_TOKEN`` while letting ``GITHUB_TOKEN``
+      through (see ``_HERMES_PROVIDER_ENV_BLOCKLIST``), so the surviving var is
+      always populated. Sourcing from the credential file (the proven-good token
+      that already authenticates ``git push``) means this works even though the
+      gateway/delegate process env has no token at all. When there's no
+      credential file, fall back to mirroring whatever token is already in env.
     """
     profile_subprocess_home = os.path.join(profile_home, "home")
+    token: Optional[str] = None
     if os.path.isdir(profile_subprocess_home):
         env["HOME"] = profile_subprocess_home
+        token = _token_from_git_credentials(
+            os.path.join(profile_subprocess_home, ".git-credentials")
+        )
 
-    github_token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
-    if github_token:
-        env.setdefault("GITHUB_TOKEN", github_token)
-        env.setdefault("GH_TOKEN", github_token)
+    # Fall back to the ambient env token only when the credential file yielded
+    # nothing (no per-profile home, or a token-less file).
+    if not token:
+        token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
+
+    if token:
+        # Assign both so gh (GITHUB_TOKEN) and any GH_TOKEN consumer agree, and
+        # so a stale inherited value can't shadow the credential-file token git
+        # actually uses.
+        env["GITHUB_TOKEN"] = token
+        env["GH_TOKEN"] = token
 
 
 def run_delegate_in_profile(
