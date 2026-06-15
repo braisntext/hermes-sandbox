@@ -111,6 +111,113 @@ def test_delegate_prompt_absent_by_default(tmp_path):
     assert "HERMES_DELEGATE_NO_PROMPT" not in captured["env"]
 
 
+def test_delegate_env_pins_home_to_profile_subprocess_home(tmp_path):
+    """When <profile_home>/home exists, the subprocess HOME must point at it so
+    git/gh use the profile's own credentialed HOME (not the gateway default)."""
+    profile_home = tmp_path / "profiles" / "finview"
+    (profile_home / "home").mkdir(parents=True)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert captured["env"]["HOME"] == str(profile_home / "home")
+
+
+def test_delegate_env_leaves_home_unset_when_no_profile_home(tmp_path, monkeypatch):
+    """No <profile_home>/home dir → HOME must be left as inherited (the existing
+    credentialed fallback), never forced onto an empty/non-existent dir."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)  # note: no home/ subdir
+    monkeypatch.setenv("HOME", "/gateway/home")
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    # HOME is whatever was inherited — not rewritten to a missing profile home.
+    assert captured["env"]["HOME"] == "/gateway/home"
+    assert captured["env"]["HOME"] != str(profile_home / "home")
+
+
+def test_delegate_env_mirrors_github_token_to_gh_token(tmp_path, monkeypatch):
+    """gh accepts GH_TOKEN or GITHUB_TOKEN, but the subprocess blocklist strips
+    GH_TOKEN and keeps GITHUB_TOKEN. With only GITHUB_TOKEN set, both must be
+    present so gh authenticates off the surviving var."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert captured["env"]["GITHUB_TOKEN"] == "ghp_from_env"
+    assert captured["env"]["GH_TOKEN"] == "ghp_from_env"
+
+
+def test_delegate_env_mirrors_gh_token_to_github_token(tmp_path, monkeypatch):
+    """The reverse: when only GH_TOKEN is set upstream, GITHUB_TOKEN (the var that
+    survives the subprocess env blocklist) must be populated from it."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "ghp_only_gh")
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert captured["env"]["GITHUB_TOKEN"] == "ghp_only_gh"
+    assert captured["env"]["GH_TOKEN"] == "ghp_only_gh"
+
+
+def test_delegate_env_does_not_invent_token_when_absent(tmp_path, monkeypatch):
+    """No token in the parent env → neither var is fabricated (no empty creds)."""
+    profile_home = tmp_path / "profiles" / "finview"
+    profile_home.mkdir(parents=True)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompleted(_ok_stdout())
+
+    with patch("hermes_cli.profiles.resolve_profile_env", return_value=str(profile_home)), \
+            patch("subprocess.run", _fake_run):
+        delegate_core.run_delegate_in_profile("task-1", "do it", "finview")
+
+    assert "GITHUB_TOKEN" not in captured["env"]
+    assert "GH_TOKEN" not in captured["env"]
+
+
 def test_auto_profile_field_on_message_event():
     """MessageEvent must carry auto_profile=None by default and accept a profile name."""
     from gateway.platforms.base import MessageEvent

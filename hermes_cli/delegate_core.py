@@ -222,6 +222,42 @@ def run_delegate_agent(
     return result
 
 
+def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
+    """Make the delegate subprocess able to ``git push`` / ``gh pr create`` with
+    ambient credentials, identical to the default/cron lane.
+
+    The interactive profile-delegate lane previously inherited only the gateway
+    process's ``HOME`` (the *default* profile's), so git/gh in a tenant topic
+    used the wrong credential store — or none — and the agent ended up asking
+    the user to paste a raw token. Two fixes, both in-place on *env*:
+
+    * **HOME pin.** When ``<profile_home>/home`` exists (the per-profile
+      subprocess HOME that the container boot hook populates with
+      ``.git-credentials`` + ``.gitconfig`` — see ``get_subprocess_home`` and
+      ``docker/cont-init.d/03-biglobster-config`` §4), point the subprocess at
+      it. This makes the delegate *process itself* — not just the grandchild
+      git/gh processes that re-derive HOME via ``get_subprocess_home`` — use the
+      tenant's credentialed HOME. Guarded on existence so we never strand the
+      lane on an empty HOME: if the dir is absent we leave HOME untouched and
+      the existing fallback (the gateway's credentialed HOME) stands.
+
+    * **Token mirror.** ``gh`` accepts ``GH_TOKEN`` *or* ``GITHUB_TOKEN``, but
+      the subprocess env blocklist strips ``GH_TOKEN`` while letting
+      ``GITHUB_TOKEN`` through (see ``_HERMES_PROVIDER_ENV_BLOCKLIST``). Mirror
+      whichever is present onto the other so the surviving var (``GITHUB_TOKEN``)
+      is always populated for ``gh``, and in-process consumers that read
+      ``GH_TOKEN`` still work.
+    """
+    profile_subprocess_home = os.path.join(profile_home, "home")
+    if os.path.isdir(profile_subprocess_home):
+        env["HOME"] = profile_subprocess_home
+
+    github_token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
+    if github_token:
+        env.setdefault("GITHUB_TOKEN", github_token)
+        env.setdefault("GH_TOKEN", github_token)
+
+
 def run_delegate_in_profile(
     task_id: str,
     prompt: str,
@@ -252,6 +288,7 @@ def run_delegate_in_profile(
         return {"final_response": "", "error": f"Invalid delegate profile {profile!r}: {exc}"}
 
     env = {**os.environ, "HERMES_HOME": profile_home}
+    _apply_profile_git_auth(env, profile_home)
     if no_delegate_prompt:
         env["HERMES_DELEGATE_NO_PROMPT"] = "1"
     if resume_history:
