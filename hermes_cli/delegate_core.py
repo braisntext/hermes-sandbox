@@ -250,6 +250,37 @@ def _token_from_git_credentials(creds_path: str) -> Optional[str]:
     return None
 
 
+def _write_gh_hosts(subprocess_home: str, token: str) -> None:
+    """Persist gh's on-disk credential (``hosts.yml``) in the profile HOME.
+
+    ``gh`` authenticates from ``GH_TOKEN``/``GITHUB_TOKEN`` *or* from
+    ``$HOME/.config/gh/hosts.yml``. The subprocess env blocklist
+    (``_HERMES_PROVIDER_ENV_BLOCKLIST``) strips **both** token vars before a
+    shelled ``gh`` runs — verified in prod: the delegate exports the token but
+    ``_make_run_env`` removes it, so ``gh auth status`` reports "not logged in".
+    The env path therefore cannot work for the agent's ``gh`` calls. Instead we
+    give ``gh`` the same disk-based auth that ``git`` already gets from
+    ``.git-credentials``: mirror the token into ``<HOME>/.config/gh/hosts.yml``.
+    Rewritten each delegation so a rotated token stays current. Best-effort —
+    a write failure must never abort the delegation (``git`` still works off
+    ``.git-credentials``).
+    """
+    try:
+        gh_dir = os.path.join(subprocess_home, ".config", "gh")
+        os.makedirs(gh_dir, exist_ok=True)
+        hosts_path = os.path.join(gh_dir, "hosts.yml")
+        content = (
+            "github.com:\n"
+            f"    oauth_token: {token}\n"
+            "    git_protocol: https\n"
+        )
+        with open(hosts_path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(hosts_path, 0o600)
+    except OSError:
+        logger.debug("Delegate: could not write gh hosts.yml", exc_info=True)
+
+
 def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
     """Make the delegate subprocess able to ``git push`` / ``gh pr create`` with
     ambient credentials, identical to the default/cron lane.
@@ -260,9 +291,8 @@ def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
     ``GITHUB_TOKEN`` nor ``GH_TOKEN``; the token lives only on disk in the
     profile's ``.git-credentials`` and in the agent's prompt). So ``git push``
     could still work off the credential file, but ``gh`` — which reads the token
-    from the environment, not ``.git-credentials`` — had nothing to authenticate
-    with, and the agent fell back to begging the user for a raw token. Two
-    fixes, both in-place on *env*:
+    from the environment — had nothing to authenticate with, and the agent fell
+    back to begging the user for a raw token. Three fixes:
 
     * **HOME pin.** When ``<profile_home>/home`` exists (the per-profile
       subprocess HOME that the container boot hook populates with
@@ -274,15 +304,16 @@ def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
       lane on an empty HOME: if the dir is absent we leave HOME untouched and
       the existing fallback (the gateway's credentialed HOME) stands.
 
-    * **Token export.** Give ``gh`` the *same* token ``git`` already uses by
-      reading it out of the profile's ``.git-credentials`` and exporting it as
-      both ``GITHUB_TOKEN`` and ``GH_TOKEN``. ``gh`` accepts either, but the
-      subprocess env blocklist strips ``GH_TOKEN`` while letting ``GITHUB_TOKEN``
-      through (see ``_HERMES_PROVIDER_ENV_BLOCKLIST``), so the surviving var is
-      always populated. Sourcing from the credential file (the proven-good token
-      that already authenticates ``git push``) means this works even though the
-      gateway/delegate process env has no token at all. When there's no
-      credential file, fall back to mirroring whatever token is already in env.
+    * **gh disk auth.** Mirror the token from ``.git-credentials`` into
+      ``<HOME>/.config/gh/hosts.yml`` (see :func:`_write_gh_hosts`). This is the
+      load-bearing fix for ``gh``: the env-token path is defeated by the
+      subprocess env blocklist (it strips ``GITHUB_TOKEN`` *and* ``GH_TOKEN``),
+      so ``gh`` must authenticate from disk, exactly like ``git``.
+
+    * **Token export (best-effort).** Also set ``GITHUB_TOKEN``/``GH_TOKEN`` on
+      the delegate env for any *in-process* consumer that reads them directly
+      (those don't pass through the shell-tool blocklist). Sourced from the same
+      ``.git-credentials`` token, falling back to whatever is already in env.
     """
     profile_subprocess_home = os.path.join(profile_home, "home")
     token: Optional[str] = None
@@ -298,9 +329,11 @@ def _apply_profile_git_auth(env: Dict[str, str], profile_home: str) -> None:
         token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN")
 
     if token:
-        # Assign both so gh (GITHUB_TOKEN) and any GH_TOKEN consumer agree, and
-        # so a stale inherited value can't shadow the credential-file token git
-        # actually uses.
+        # Disk-based gh auth — the actual fix for `gh` (env tokens are stripped).
+        if os.path.isdir(profile_subprocess_home):
+            _write_gh_hosts(profile_subprocess_home, token)
+        # Best-effort env export for in-process consumers. Assign both so a
+        # stale inherited value can't shadow the credential-file token.
         env["GITHUB_TOKEN"] = token
         env["GH_TOKEN"] = token
 
