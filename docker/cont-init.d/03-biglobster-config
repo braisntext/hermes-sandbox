@@ -258,9 +258,9 @@ fi
 # this loop, section 4 only refreshed the default, so after a $GITHUB_TOKEN
 # rotation every profile home kept a STALE (revoked) token and profile-scoped
 # push/clone broke — the failure hand-fixed for the finview profile on
-# 2026-06-12. Guard: only profiles whose home/ dir already exists (mirrors
-# get_subprocess_home, which returns None otherwise) so we never create a
-# spurious home/. SOUL.md is the real-profile marker, same as sections 1/2/5.
+# 2026-06-12. SOUL.md is the real-profile marker, same as sections 1/2/5;
+# the home/ subdir is created on demand so a profile that never had one still
+# gets working credentials (grow-shop hit exactly this on 2026-06-15).
 if [ -n "$GITHUB_TOKEN" ]; then
     HOME="$HERMES_HOME" git config --global credential.helper store
     HOME="$HERMES_HOME" git config --global user.name "Hermes Agent"
@@ -272,11 +272,17 @@ if [ -n "$GITHUB_TOKEN" ]; then
 
     # Per-profile subprocess homes — run as hermes (profile homes are
     # hermes-owned). Idempotent + non-fatal, matching the script's contract.
+    # We CREATE the home/ dir for every real profile (SOUL.md present) rather
+    # than skipping profiles that lack one: a profile onboarded before home/
+    # was bootstrapped (or via a path that didn't make it) would otherwise
+    # silently never get git/gh auth — the failure hand-fixed for grow-shop on
+    # 2026-06-15. `mkdir -p` is idempotent, and get_subprocess_home() then
+    # resolves to this populated dir for the delegate lane.
     if [ -d "$HERMES_HOME/profiles" ]; then
         for prof_dir in "$HERMES_HOME/profiles"/*/; do
             [ -f "${prof_dir}SOUL.md" ] || continue
             prof_home="${prof_dir}home"
-            [ -d "$prof_home" ] || continue
+            as_hermes mkdir -p "$prof_home"
             prof_name=$(basename "$prof_dir")
             HOME="$prof_home" as_hermes git config --global credential.helper store \
                 || echo "[03-biglobster] Warning: git config failed for profile $prof_name (non-fatal)"
@@ -316,6 +322,29 @@ if [ -d "$INSTALL_DIR/docker/profiles" ]; then
     done
 fi
 
+# --- 5b: ensure the git-auth instruction in each profile's SOUL.md (idempotent) ---
+# Root cause of the repeated profile-lane git breakages: the agent tries to
+# "fix" auth itself — rewriting .git-credentials, embedding a token in the
+# remote URL, or switching to SSH. Because the token it sees is redacted to
+# ***, those writes CORRUPT the working credential (grow-shop's .git-credentials
+# was blanked this way on 2026-06-15). Auth is already ambient (credential
+# helper for git, ~/.config/gh/hosts.yml for gh — both written above), so the
+# agent must never touch it. Append a managed block to each real profile's
+# SOUL.md when absent. grep-marker keeps it idempotent and reaches EXISTING
+# profiles on the next boot, mirroring §6's MEMORY.md workspace-note pattern.
+if [ -d "$HERMES_HOME/profiles" ]; then
+    for prof_dir in "$HERMES_HOME/profiles"/*/; do
+        soul="${prof_dir}SOUL.md"
+        [ -f "$soul" ] || continue
+        if ! grep -q "Git Auth (managed" "$soul" 2>/dev/null; then
+            prof_name=$(basename "$prof_dir")
+            printf '\n## Git Auth (managed — do not edit)\n- Auth is ambient: `git push` uses the stored credential helper and `gh` uses its on-disk config (`~/.config/gh/hosts.yml`). Both are provisioned for you.\n- NEVER write, edit, or recreate `.git-credentials` or `~/.config/gh/hosts.yml`, and NEVER put a token in a remote URL. The token you see is redacted to `***`, so writing it BLANKS the working credential and breaks all pushes.\n- NEVER switch a remote to SSH or generate SSH keys. Remotes stay tokenless `https://github.com/<owner>/<repo>.git`.\n- If a push or `gh` command fails auth, report it to the user verbatim — do not try to fix credentials yourself.\n' \
+                | as_hermes tee -a "$soul" > /dev/null \
+                && echo "[03-biglobster] Appended Git Auth block to profiles/$prof_name/SOUL.md"
+        fi
+    done
+fi
+
 # --- 6: per-profile repo sync (clone on first boot, pull on subsequent boots) ---
 # Any profile with a repos.txt gets its listed GitHub repos cloned into
 # <profile>/workspace/<repo-name>/. Format: one "owner/repo" per line;
@@ -333,6 +362,14 @@ if [ -d "$HERMES_HOME/profiles" ]; then
             repo_name="${repo##*/}"
             target="$workspace/$repo_name"
             if [ -d "$target/.git" ]; then
+                # Normalize the remote to tokenless https every boot. An embedded
+                # token (https://x-access-token:TOKEN@github.com/…) gets redacted
+                # to *** in the agent's view, so the agent concludes auth is
+                # broken and detours to generating an SSH key — the grow-shop
+                # landing failure on 2026-06-15. Tokenless lets the credential
+                # helper supply the token transparently. Idempotent + non-fatal.
+                HOME="$HERMES_HOME" as_hermes git -C "$target" remote set-url origin \
+                    "https://github.com/$repo.git" 2>/dev/null || true
                 echo "[03-biglobster] Pulling $repo"
                 HOME="$HERMES_HOME" as_hermes timeout 120 git -C "$target" pull --ff-only --quiet 2>&1 \
                     || echo "[03-biglobster] Warning: git pull failed/timed out for $repo (non-fatal)"
