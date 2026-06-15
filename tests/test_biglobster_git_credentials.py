@@ -62,12 +62,13 @@ def test_per_profile_loop_guards_on_soul_marker(boot_text: str) -> None:
     assert '[ -f "${prof_dir}SOUL.md" ] || continue' in s4
 
 
-def test_per_profile_loop_only_writes_when_home_dir_exists(boot_text: str) -> None:
-    """Mirror get_subprocess_home(): write only when home/ already exists so
-    we never create a spurious home/ dir."""
+def test_per_profile_loop_creates_home_dir(boot_text: str) -> None:
+    """§4 CREATES home/ for every real profile (PR #34) rather than skipping
+    profiles that lack one: a profile onboarded before home/ was bootstrapped
+    would otherwise silently never get git/gh auth (grow-shop, 2026-06-15)."""
     s4 = _section4(boot_text)
     assert 'prof_home="${prof_dir}home"' in s4
-    assert '[ -d "$prof_home" ] || continue' in s4
+    assert 'as_hermes mkdir -p "$prof_home"' in s4
 
 
 def test_per_profile_credential_written_under_profile_home(boot_text: str) -> None:
