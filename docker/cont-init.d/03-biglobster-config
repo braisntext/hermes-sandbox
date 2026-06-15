@@ -51,6 +51,42 @@ export GIT_HTTP_LOW_SPEED_TIME=30
 # Drop to hermes (matching stage2-hook.sh) so files land hermes-owned.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
 
+# --- GitHub token resolution (single source of truth: $HERMES_HOME/.env) ---
+# GITHUB_TOKEN is NOT a platform-injected process env var in this deployment:
+# Zeabur carries it neither in the container env nor in
+# /run/s6/container_environment, so `with-contenv` hands this script an empty
+# $GITHUB_TOKEN. The only durable copy lives in $HERMES_HOME/.env — historically
+# as DUPLICATE, DIVERGENT lines (a stale classic `ghp_…` PAT alongside the valid
+# fine-grained `github_pat_…` one). Without this block two things silently break
+# every boot:
+#   * section 1's env sync skips GITHUB_TOKEN (its os.environ lookup is empty),
+#     so the divergent .env lines are never deduped and the gateway's own
+#     load_dotenv (last-occurrence-wins) may load a revoked token.
+#   * section 4 prints "GITHUB_TOKEN not set" and writes no git credential store,
+#     so git/gh auth survives only on hand-placed on-disk files — fragile across
+#     rotations and new profiles.
+#
+# Resolve the token the same way the gateway's load_dotenv does (last occurrence
+# wins), preferring an explicit process-env value (authoritative when an operator
+# sets GITHUB_TOKEN/GH_TOKEN on the platform) over the last matching line in the
+# main .env. Export it and mirror GH_TOKEN so the section-1 python and the
+# section-4 git config consume one consistent value, and so the gateway/delegate
+# process env (which inherits this hook's downstream .env writes via load_dotenv)
+# carries BOTH names.
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+    GITHUB_TOKEN="${GH_TOKEN:-}"
+fi
+if [ -z "${GITHUB_TOKEN:-}" ] && [ -f "$HERMES_HOME/.env" ]; then
+    GITHUB_TOKEN=$(grep -E '^GITHUB_TOKEN=' "$HERMES_HOME/.env" 2>/dev/null \
+        | tail -n1 | cut -d= -f2- | tr -d '\r')
+    [ -n "$GITHUB_TOKEN" ] || GITHUB_TOKEN=$(grep -E '^GH_TOKEN=' "$HERMES_HOME/.env" 2>/dev/null \
+        | tail -n1 | cut -d= -f2- | tr -d '\r')
+fi
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    GH_TOKEN="$GITHUB_TOKEN"
+    export GITHUB_TOKEN GH_TOKEN
+fi
+
 # --- 0: restore missing SOUL.md files from bundled templates ---
 # SOUL.md is both the agent's personality file AND the real-profile marker used
 # by steps 1, 2, and 5 below. If an agent or user accidentally deletes it the
@@ -94,10 +130,13 @@ home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
 #    OVERWRITE the per-profile value. If you later want per-tenant billing with
 #    a DISTINCT OPENROUTER_API_KEY per profile, drop that key from `inject`
 #    (or special-case it) before deploying.
+#    GH_TOKEN is synced alongside GITHUB_TOKEN (mirrored to the same value by
+#    the token-resolution block above) so any consumer that reads only GH_TOKEN
+#    — and the gateway/delegate process env via load_dotenv — gets it too.
 inject = [
     "OPENROUTER_API_KEY", "HERMES_CALLBACK_SECRET", "HERMES_CALLBACK_URL",
     "HERMES_MAX_ITERATIONS", "EXA_API_KEY", "HUGGINGFACE_API_KEY",
-    "GITHUB_TOKEN", "AUXILIARY_VISION_MODEL",
+    "GITHUB_TOKEN", "GH_TOKEN", "AUXILIARY_VISION_MODEL",
 ]
 
 def _sync_env_file(env_path):
@@ -106,8 +145,22 @@ def _sync_env_file(env_path):
         val = os.environ.get(var, "")
         if not val:
             continue
-        if re.search(rf"^{re.escape(var)}=", content, re.MULTILINE):
-            content = re.sub(rf"^{re.escape(var)}=.*", f"{var}={val}", content, flags=re.MULTILINE)
+        line_re = rf"^{re.escape(var)}=.*$"
+        matches = re.findall(line_re, content, flags=re.MULTILINE)
+        if len(matches) == 1:
+            # Single line — replace in place, preserving file position.
+            content = re.sub(line_re, lambda _m: f"{var}={val}", content, flags=re.MULTILINE)
+        elif len(matches) > 1:
+            # DUPLICATE / divergent lines (the GITHUB_TOKEN case: a stale
+            # ghp_ PAT plus the valid github_pat_ one). load_dotenv keeps the
+            # last occurrence, so leaving duplicates risks loading a revoked
+            # token. Strip every occurrence and append exactly one canonical
+            # line. Idempotent: on the next boot the single line is stripped
+            # and re-appended unchanged.
+            content = re.sub(rf"^{re.escape(var)}=.*(?:\n|$)", "", content, flags=re.MULTILINE)
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += f"{var}={val}\n"
         else:
             sep = "" if (not content or content.endswith("\n")) else "\n"
             content += f"{sep}{var}={val}\n"
