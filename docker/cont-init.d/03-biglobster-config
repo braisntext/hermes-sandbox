@@ -236,6 +236,25 @@ def _reconcile_config(config_path, label):
                 else:
                     cfg["model"] = {"default": default_model, "provider": "openrouter", "base_url": ""}
                 changed = True
+        # Enable the Langfuse observability plugin when its keys are present.
+        # The recorder is OPT-IN via plugins.enabled — the env keys alone do
+        # NOT activate it (the #1 source of "I set the keys but see no traces").
+        # Append the plugin's registry key (loader also accepts the bare
+        # "langfuse") WITHOUT clobbering any other enabled plugins. Idempotent:
+        # once present, later boots make no change. Gated on the keys so we
+        # never enable a recorder that has nowhere to send traces.
+        if os.environ.get("HERMES_LANGFUSE_PUBLIC_KEY") and os.environ.get("HERMES_LANGFUSE_SECRET_KEY"):
+            plugins_cfg = cfg.get("plugins")
+            if not isinstance(plugins_cfg, dict):
+                plugins_cfg = {}
+                cfg["plugins"] = plugins_cfg
+            enabled = plugins_cfg.get("enabled")
+            if not isinstance(enabled, list):
+                enabled = []
+            if "observability/langfuse" not in enabled and "langfuse" not in enabled:
+                enabled.append("observability/langfuse")
+                plugins_cfg["enabled"] = enabled
+                changed = True
         if changed:
             config_path.write_text(yaml.dump(cfg, default_flow_style=False))
             print(f"[03-biglobster] {label}: reconciled config.yaml keys")
