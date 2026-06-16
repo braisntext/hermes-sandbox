@@ -42,8 +42,13 @@ def run_scenario(scenario: Dict[str, Any]) -> str:
     if kind == "function_call":
         module = importlib.import_module(scenario["module"])
         func = getattr(module, scenario["function"])
-        agent = SimpleNamespace(**(scenario.get("agent_state") or {}))
-        result = func(agent)
+        # Two shapes: explicit literal `args` (any callable), or a stub `agent`
+        # built from `agent_state` and passed as the sole positional argument.
+        if "args" in scenario:
+            result = func(*scenario["args"])
+        else:
+            agent = SimpleNamespace(**(scenario.get("agent_state") or {}))
+            result = func(agent)
         wrap = scenario.get("wrap")
         return wrap.format(result=result) if wrap else str(result)
     raise ValueError(f"unsupported scenario kind: {kind!r}")
