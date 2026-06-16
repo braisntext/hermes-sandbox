@@ -417,6 +417,24 @@ if [ -d "$HERMES_HOME/profiles" ]; then
     done
 fi
 
+# --- 5c: seed the incident-watcher cron script (overwrite every boot to stay current) ---
+# Phase 0 incident watcher: an hourly no_agent cron job runs this wrapper, which
+# execs incidents/sweep.py from the install dir (so `incidents` imports) with
+# HERMES_HOME provided by the cron runner. Empty stdout = silent delivery.
+# Register the job ONCE (after deploy, in the container shell):
+#   hermes cron create "every 1h" --no-agent --script incident_sweep.sh \
+#     --deliver "telegram:<chat_id>:1904" --name incident-watcher
+as_hermes mkdir -p "$HERMES_HOME/scripts"
+cat > "$HERMES_HOME/scripts/incident_sweep.sh" <<'SWEEP'
+#!/bin/bash
+# Managed by docker/cont-init.d/03-biglobster-config — do not edit on the volume.
+cd /opt/hermes 2>/dev/null || exit 0
+exec .venv/bin/python -m incidents.sweep
+SWEEP
+chmod +x "$HERMES_HOME/scripts/incident_sweep.sh"
+chown hermes:hermes "$HERMES_HOME/scripts/incident_sweep.sh" 2>/dev/null || true
+echo "[03-biglobster] Seeded scripts/incident_sweep.sh"
+
 # --- 6: per-profile repo sync (clone on first boot, pull on subsequent boots) ---
 # Any profile with a repos.txt gets its listed GitHub repos cloned into
 # <profile>/workspace/<repo-name>/. Format: one "owner/repo" per line;
