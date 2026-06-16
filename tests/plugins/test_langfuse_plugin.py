@@ -558,6 +558,129 @@ class TestToolCallOutputBackfill:
         }]
 
 
+class _RecordingObservation:
+    """Records the calls the plugin makes against a root/child observation.
+
+    Stands in for langfuse's ``LangfuseChain`` / ``LangfuseGeneration`` so the
+    test doesn't need the optional SDK installed (the default test env omits
+    the ``observability`` extra).  Mirrors the v4 span surface the plugin
+    uses: ``set_trace_io``, ``update``, ``start_observation``, ``end``."""
+
+    def __init__(self, name=None):
+        self.name = name
+        self.trace_input = None
+        self.trace_output = None
+        self.updates: list[dict] = []
+        self.children: list["_RecordingObservation"] = []
+        self.ended = False
+
+    def set_trace_io(self, *, input=None, output=None):
+        if input is not None:
+            self.trace_input = input
+        if output is not None:
+            self.trace_output = output
+        return self
+
+    def update(self, **kwargs):
+        self.updates.append(kwargs)
+        return self
+
+    def start_observation(self, *, name, as_type, input=None, metadata=None,
+                          model=None, model_parameters=None):
+        child = _RecordingObservation(name=name)
+        self.children.append(child)
+        return child
+
+    def end(self, **_):
+        self.ended = True
+        return self
+
+
+class _RootContext:
+    """Context-manager wrapper returned by ``start_as_current_observation``."""
+
+    def __init__(self, observation):
+        self._observation = observation
+
+    def __enter__(self):
+        return self._observation
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RecordingLangfuse:
+    """Records ``create_trace_id`` / ``start_as_current_observation`` / ``flush``."""
+
+    def __init__(self):
+        self.flushed = 0
+        self.root_observations: list[_RecordingObservation] = []
+
+    def create_trace_id(self, *, seed=None):
+        return f"trace::{seed}"
+
+    def start_as_current_observation(self, *, trace_context=None, name, as_type="span",
+                                     input=None, metadata=None, end_on_exit=None):
+        obs = _RecordingObservation(name=name)
+        if input is not None:
+            obs.set_trace_io(input=input)
+        self.root_observations.append(obs)
+        return _RootContext(obs)
+
+    def flush(self):
+        self.flushed += 1
+
+
+class TestRootTraceIO:
+    """Regression guard for the v3→v4 fix: the trace ROOT observation must be
+    created with name="Hermes turn" plus the user message as input, and the
+    final reply must land as the root's output on finish.  This is the
+    trace-level data that rendered as "Unnamed span" / null I/O before the SDK
+    bump (server >= 3.187.0 no longer honored the v3 trace-attribute format)."""
+
+    def _make_mod(self, monkeypatch):
+        sys.modules.pop("plugins.observability.langfuse", None)
+        mod = importlib.import_module("plugins.observability.langfuse")
+        mod._TRACE_STATE.clear()
+        # No SDK in the default test env → propagate_attributes is None and the
+        # plugin takes the direct start_as_current_observation path. Pin that.
+        monkeypatch.setattr(mod, "propagate_attributes", None, raising=False)
+        return mod
+
+    def test_root_observation_has_name_and_input_and_output(self, monkeypatch):
+        mod = self._make_mod(monkeypatch)
+        client = _RecordingLangfuse()
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+
+        mod.on_pre_llm_request(
+            task_id="task-1", session_id="sess-1", api_call_count=1,
+            request_messages=[
+                {"role": "system", "content": "you are hermes"},
+                {"role": "user", "content": "What is 2+2?"},
+            ],
+            model="gpt-x", provider="openai",
+        )
+
+        assert len(client.root_observations) == 1, "expected exactly one root observation"
+        root = client.root_observations[0]
+        # Name is set at creation (server uses it as the trace name).
+        assert root.name == "Hermes turn"
+        # Trace-level input is the last user message, not null.
+        assert root.trace_input == {"role": "user", "content": "What is 2+2?"}
+
+        # Finish the turn with a content-only assistant reply (no tool calls)
+        # → the plugin closes the trace and records the reply as output.
+        mod.on_post_llm_call(
+            task_id="task-1", session_id="sess-1", api_call_count=1,
+            assistant_response="2+2 = 4",
+        )
+
+        assert root.trace_output == {"content": "2+2 = 4", "reasoning": None, "tool_calls": []}
+        assert any(u.get("output") for u in root.updates), "root.update(output=...) not called"
+        assert root.ended is True
+        assert client.flushed >= 1
+
+
 class TestToolObservationKeying:
     """Tests for pre/post tool_call observation matching when tool_call_id is absent."""
 
