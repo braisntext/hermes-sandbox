@@ -1,0 +1,42 @@
+name: fallback_switch_notice
+description: >
+  When the primary model (e.g. owl-alpha) is rate-limited and a paid fallback
+  answers the turn, the user-facing reply must (1) still deliver a non-empty
+  answer and (2) tell the user, in Spanish, that a backup model was used.
+  Regression guard for PR #30 (paid fallback model + user notice on switch).
+
+# How the runner produces the user-facing output for this case.
+# kind: function_call -> import module.function, call it with a stub agent
+# carrying `agent_state` attributes, then apply `wrap` to the return value.
+scenario:
+  kind: function_call
+  module: agent.chat_completion_helpers
+  function: fallback_switch_notice
+  agent_state:
+    _fallback_index: 1
+    _primary_runtime:
+      model: owl-alpha
+    model: tencent/hy3-preview
+  # Simulate the gateway/profile-delegate append (hermes_cli/delegate_core.py):
+  # body + "\n\n" + notice. `{result}` is the function's return value.
+  wrap: "Aquí tienes el resumen que pediste.\n\n{result}"
+
+# Plain-English assertions. `text` is what the LLM-as-judge evaluates.
+# `check` is the deterministic fallback used in hermetic / CI runs.
+assertions:
+  - text: >
+      The reply tells the user, in Spanish, that the primary model is saturated
+      or overloaded and that a backup (respaldo) model produced this answer.
+    check:
+      must_contain: ["saturado", "respaldo"]
+  - text: >
+      The user still receives the actual answer — the notice is appended to the
+      reply, not substituted for it (output is non-empty and keeps the body).
+    check:
+      must_be_nonempty: true
+      must_contain: ["resumen"]
+
+# Files the diagnose step reads when an assertion fails.
+source_hints:
+  - agent/chat_completion_helpers.py
+  - hermes_cli/delegate_core.py
