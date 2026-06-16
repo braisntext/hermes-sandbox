@@ -221,6 +221,9 @@ all = [
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]
+observability = [
+    "langfuse>=3,<4",
+]
 
 [project.scripts]
 hermes = "hermes_cli.main:main"
