@@ -1,0 +1,29 @@
+name: profile_git_auth
+description: >
+  Every per-profile delegate lane must keep working git/GitHub auth so it can
+  push and open PRs. The boot hook provisions each real profile with a
+  https://x-access-token:<token>@github.com credential, credential.helper=store,
+  and tokenless https remotes. This has broken repeatedly — and the agent's own
+  attempts to "fix" it blank the credential (the token it sees is redacted to
+  ***) or detour to SSH. This audits the live profile homes for those exact
+  failure shapes. Tokens are never echoed (shape/length only).
+
+scenario:
+  kind: function_call
+  module: evals.checks.profile_git_auth
+  function: audit_summary
+  args: []   # audit the live profile homes
+
+assertions:
+  - text: >
+      Every profile's git/GitHub auth is intact — a valid x-access-token
+      credential, credential.helper=store, and tokenless remotes — i.e. the
+      audit reports OK with no failures.
+    check:
+      must_contain: ["OK"]
+      must_not_contain: ["FAIL"]
+
+source_hints:
+  - docker/cont-init.d/03-biglobster-config
+  - hermes_constants.py
+  - evals/checks/profile_git_auth.py
