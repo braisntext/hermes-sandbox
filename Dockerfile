@@ -180,10 +180,14 @@ RUN npm install --prefer-offline --no-audit && \
 # so Docker users can use these providers without requiring runtime
 # lazy-install access to PyPI (often blocked in containerized envs).
 #
+# `observability` ships the Langfuse SDK so the opt-in tracing plugin
+# (plugins/observability/langfuse) actually has an engine in the image —
+# without it the plugin loads but fails open silently (no traces, no logs).
+#
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra observability
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
