@@ -1,0 +1,128 @@
+"""LLM-as-judge for eval assertions, with a deterministic fallback.
+
+Two modes:
+
+* **LLM judge** (``use_llm=True``): shells out to the ``hermes -z`` oneshot CLI
+  and asks the configured model to return PASS/FAIL for the assertion against
+  the produced output. Mirrors a real user turn (respects the operator's model /
+  provider config). Requires the ``hermes`` CLI on PATH and provider creds.
+* **Deterministic** (default): evaluates the structural ``check`` block from the
+  case (``must_contain`` / ``must_not_contain`` / ``must_be_nonempty``). This is
+  the path used in hermetic / CI runs where no model call is allowed.
+
+The LLM path always degrades to the deterministic path on any error, so a
+missing CLI or expired key never turns a green suite red for the wrong reason.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+
+@dataclass
+class JudgeResult:
+    passed: bool
+    reason: str
+    mode: str  # "deterministic" | "llm" | "llm->deterministic"
+
+
+def judge(
+    output: str,
+    assertion: Dict[str, Any],
+    *,
+    use_llm: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> JudgeResult:
+    """Evaluate a single assertion against ``output``."""
+    text = (assertion.get("text") or "").strip()
+    check = assertion.get("check") or {}
+
+    if use_llm:
+        result = _llm_judge(output, text, model=model, provider=provider)
+        if result is not None:
+            return result
+        det = _deterministic(output, check)
+        return JudgeResult(det.passed, f"(LLM judge unavailable) {det.reason}", "llm->deterministic")
+
+    return _deterministic(output, check)
+
+
+def _deterministic(output: str, check: Dict[str, Any]) -> JudgeResult:
+    if not check:
+        return JudgeResult(
+            False,
+            "no deterministic `check` defined for this assertion; rerun with --llm-judge",
+            "deterministic",
+        )
+
+    haystack = (output or "").lower()
+
+    if check.get("must_be_nonempty") and not (output or "").strip():
+        return JudgeResult(False, "output is empty", "deterministic")
+
+    missing = [s for s in check.get("must_contain", []) if s.lower() not in haystack]
+    if missing:
+        return JudgeResult(False, f"missing required substrings: {missing}", "deterministic")
+
+    present = [s for s in check.get("must_not_contain", []) if s.lower() in haystack]
+    if present:
+        return JudgeResult(False, f"contains forbidden substrings: {present}", "deterministic")
+
+    return JudgeResult(True, "all deterministic checks passed", "deterministic")
+
+
+_JUDGE_PROMPT = """You are a strict, literal test judge. Decide whether the AGENT OUTPUT \
+satisfies the ASSERTION. Do not be lenient.
+
+ASSERTION:
+{assertion}
+
+AGENT OUTPUT:
+\"\"\"
+{output}
+\"\"\"
+
+Reply with exactly PASS or FAIL on the first line, then one short line explaining why."""
+
+
+def _llm_judge(
+    output: str,
+    assertion_text: str,
+    *,
+    model: Optional[str],
+    provider: Optional[str],
+    timeout: int = 120,
+) -> Optional[JudgeResult]:
+    """Return a JudgeResult from the model, or None if the CLI is unavailable."""
+    cli = os.environ.get("HERMES_EVAL_CLI") or shutil.which("hermes")
+    if not cli:
+        return None
+
+    prompt = _JUDGE_PROMPT.format(assertion=assertion_text, output=output)
+    cmd = [cli, "-z", prompt]
+    if model:
+        cmd += ["--model", model]
+    if provider:
+        cmd += ["--provider", provider]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    verdict = (proc.stdout or "").strip()
+    if not verdict:
+        return None
+    first = verdict.splitlines()[0].strip().upper()
+    reason = verdict.splitlines()[1].strip() if len(verdict.splitlines()) > 1 else verdict
+    if first.startswith("PASS"):
+        return JudgeResult(True, reason, "llm")
+    if first.startswith("FAIL"):
+        return JudgeResult(False, reason, "llm")
+    return None  # unparseable -> caller falls back to deterministic
