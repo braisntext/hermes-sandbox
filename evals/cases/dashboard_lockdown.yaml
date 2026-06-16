@@ -1,0 +1,25 @@
+name: dashboard_lockdown
+description: >
+  The dashboard's set of unauthenticated ("public") endpoints must stay minimal
+  and never include a sensitive or mutation endpoint (MCP/tools/config-write).
+  This is the exact vector the cryptominer used — fake MCP servers injected via
+  an ungated panel. Guards the OAuth-gate lockdown so it cannot silently regress.
+
+scenario:
+  kind: function_call
+  module: evals.checks.dashboard_gate
+  function: audit_summary
+  args: []   # audit the live PUBLIC_API_PATHS allowlist
+
+assertions:
+  - text: >
+      The live public allowlist is minimal and contains no sensitive or mutation
+      endpoint — i.e. the audit reports OK with no failures.
+    check:
+      must_contain: ["OK"]
+      must_not_contain: ["FAIL"]
+
+source_hints:
+  - hermes_cli/dashboard_auth/public_paths.py
+  - hermes_cli/dashboard_auth/middleware.py
+  - evals/checks/dashboard_gate.py
