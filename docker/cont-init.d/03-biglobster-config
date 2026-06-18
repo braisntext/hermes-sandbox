@@ -137,6 +137,9 @@ inject = [
     "OPENROUTER_API_KEY", "HERMES_CALLBACK_SECRET", "HERMES_CALLBACK_URL",
     "HERMES_MAX_ITERATIONS", "EXA_API_KEY", "HUGGINGFACE_API_KEY",
     "GITHUB_TOKEN", "GH_TOKEN", "AUXILIARY_VISION_MODEL",
+    # Read-only Google Search Console service-account key (base64), consumed by
+    # the gsc MCP server (config.yaml mcp_servers.gsc). See optional-mcps/gsc/.
+    "GSC_SERVICE_ACCOUNT_B64",
 ]
 
 def _sync_env_file(env_path):
