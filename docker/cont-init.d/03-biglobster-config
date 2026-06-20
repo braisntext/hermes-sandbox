@@ -23,6 +23,9 @@
 #   4. Wire GITHUB_TOKEN into git credential store (refreshed every boot).
 #   5. Seed per-profile bootstrap files from docker/profiles/<name>/ (once).
 #   6. Clone / pull per-profile repos declared in repos.txt → workspace/.
+#   6b. Provision isolated BigLobster site checkouts (one per consuming cron
+#      job) under checkouts/ so the SEO/GEO and Gap Hunter jobs no longer
+#      share a working tree.
 #   7. Log egress reachability for OpenRouter / HuggingFace.
 #
 # Never fatal: a non-zero exit from a cont-init script aborts container
@@ -509,6 +512,60 @@ if [ -d "$HERMES_HOME/profiles" ]; then
         fi
     done
 fi
+
+# --- 6b: isolated BigLobster site checkouts (one per consuming cron job) ---
+# The SEO/GEO cron and the Content Gap Hunter cron both edit the BigLobster
+# site repo (braisntext/biglobster — the biglobster.top blog under web/blog/).
+# They used to share ONE working tree, which collided on branch AND git
+# identity: Gap Hunter left the tree on a blog/<slug> feature branch authored
+# as "BigLobster <biglobster@biglobster.top>", so the SEO agent's commits
+# landed on the wrong branch as the wrong author — never reached main and later
+# tripped the "human edit" ledger detector (author != hermes@agent.local). The
+# SEO cron PROMPT papered over it (PASO 0: fetch + checkout main + pin identity),
+# but that only reset shared state per-run and never covered Gap Hunter.
+#
+# Root fix: give each job its OWN clone under checkouts/. A separate .git means
+# a separate index, HEAD, and (locally pinned) commit identity, so both jobs sit
+# on main independently and neither can perturb the other's tree or authorship.
+# Point each cron job's workdir at its directory (see BIGLOBSTER_SETUP.md).
+# Same idioms and never-fatal contract as section 6: a failed clone/pull/fetch
+# prints a warning and boot continues. The git HTTPS credential from section 4
+# (default-profile HOME=$HERMES_HOME) supplies auth transparently; the remote is
+# kept tokenless so the agent never sees a redacted token in its remote URL.
+BIGLOBSTER_SITE_REPO="braisntext/biglobster"
+checkouts_root="$HERMES_HOME/checkouts"
+as_hermes mkdir -p "$checkouts_root"
+for ckdir in biglobster-seo biglobster-gaphunter; do
+    target="$checkouts_root/$ckdir"
+    if [ -d "$target/.git" ]; then
+        # Normalize to a tokenless remote (same rationale as section 6).
+        HOME="$HERMES_HOME" as_hermes git -C "$target" remote set-url origin \
+            "https://github.com/$BIGLOBSTER_SITE_REPO.git" 2>/dev/null || true
+        echo "[03-biglobster] Refreshing site checkout $ckdir"
+        # Ensure each tree is back on main and current at boot, WITHOUT a hard
+        # reset: `checkout main` keeps non-conflicting untracked files (e.g. a
+        # cover image the Gap Hunter run left behind), and --ff-only never
+        # rewrites local history. Each step is independently non-fatal.
+        HOME="$HERMES_HOME" as_hermes timeout 120 git -C "$target" fetch --quiet origin main 2>&1 \
+            || echo "[03-biglobster] Warning: git fetch failed/timed out for $ckdir (non-fatal)"
+        HOME="$HERMES_HOME" as_hermes git -C "$target" checkout --quiet main 2>/dev/null \
+            || echo "[03-biglobster] Warning: checkout main failed for $ckdir (non-fatal)"
+        HOME="$HERMES_HOME" as_hermes timeout 120 git -C "$target" pull --ff-only --quiet 2>&1 \
+            || echo "[03-biglobster] Warning: git pull failed/timed out for $ckdir (non-fatal)"
+    else
+        echo "[03-biglobster] Cloning $BIGLOBSTER_SITE_REPO → $ckdir (depth 1)"
+        HOME="$HERMES_HOME" as_hermes timeout 300 git clone --depth=1 \
+            "https://github.com/$BIGLOBSTER_SITE_REPO.git" "$target" 2>&1 \
+            || echo "[03-biglobster] Warning: git clone failed/timed out for $ckdir (non-fatal)"
+    fi
+    # Pin commit identity LOCALLY (per-checkout, beats the global .gitconfig) so
+    # commits are always hermes@agent.local regardless of what a cron prompt or a
+    # sibling job sets — this is what PASO 0 used to do per-run, now durable.
+    if [ -d "$target/.git" ]; then
+        HOME="$HERMES_HOME" as_hermes git -C "$target" config user.name "Hermes Agent" 2>/dev/null || true
+        HOME="$HERMES_HOME" as_hermes git -C "$target" config user.email "hermes@agent.local" 2>/dev/null || true
+    fi
+done
 
 # --- 7: egress diagnostics (non-fatal) ---
 echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
