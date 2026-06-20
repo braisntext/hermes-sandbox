@@ -18,18 +18,11 @@ image_gen:
     model: x-ai/grok-imagine-image-quality
 video_gen:
   provider: huggingface
-# GSC (Google Search Console) read-only MCP server — see optional-mcps/gsc/.
-# The credential is interpolated from the env (synced into .env by
-# docker/cont-init.d/03-biglobster-config), so only the ${...} placeholder
-# lives here, never the key itself.
-mcp_servers:
-  gsc:
-    command: /opt/hermes/.venv/bin/python
-    args:
-      - /opt/hermes/optional-mcps/gsc/server.py
-    env:
-      GSC_SERVICE_ACCOUNT_B64: "${GSC_SERVICE_ACCOUNT_B64}"
-    timeout: 60
+# MCP servers are reconciled per-profile at boot by
+# docker/cont-init.d/03-biglobster-config, not seeded here. The read-only GSC
+# (Google Search Console) server is scoped to the `biglobster` profile only —
+# it reads biglobster.top data and must not load in the owner/tenant profiles.
+mcp_servers: {}
 agent:
   max_turns: 60
   gateway_timeout: 1800

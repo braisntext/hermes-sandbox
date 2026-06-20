@@ -258,18 +258,19 @@ def _reconcile_config(config_path, label):
                 enabled.append("observability/langfuse")
                 plugins_cfg["enabled"] = enabled
                 changed = True
-        # Ensure the read-only GSC MCP server is registered — MAIN profile only.
-        # docker/config.yaml ships this block, but that is only the first-boot
-        # seed: an existing volume keeps its own config.yaml (which starts as
-        # `mcp_servers: {}`), so the image change never reaches the running
-        # agent and the SEO/GEO cron silently runs without Search Console data.
-        # Reconcile it here like the other runtime-critical keys. Scoped to the
-        # default (BigLobster) profile via `label == "main"`: the tool reads
-        # biglobster.top data and must NOT leak into tenant profiles
+        # Ensure the read-only GSC MCP server is registered — biglobster
+        # profile only. docker/config.yaml ships this block, but that is only
+        # the first-boot seed: an existing volume keeps its own config.yaml
+        # (which starts as `mcp_servers: {}`), so the image change never reaches
+        # the running agent and the SEO/GEO cron silently runs without Search
+        # Console data. Reconcile it here like the other runtime-critical keys.
+        # Scoped to the `biglobster` profile (the biglobster.top website lane,
+        # `label == "biglobster"`): the tool reads biglobster.top data and must
+        # NOT leak into the owner (`main`) profile or other tenant profiles
         # (finview/grow-shop/socialagenda). The credential is interpolated from
         # the env at load time (tools/mcp_tool.py), so only the ${...}
         # placeholder is written here, never the key. See optional-mcps/gsc/.
-        if label == "main":
+        if label == "biglobster":
             servers = cfg.get("mcp_servers")
             if not isinstance(servers, dict):
                 servers = {}
@@ -282,6 +283,16 @@ def _reconcile_config(config_path, label):
             }
             if servers.get("gsc") != gsc_cfg:
                 servers["gsc"] = gsc_cfg
+                changed = True
+        # The owner (`main`) profile must NOT carry the GSC server. Volumes
+        # provisioned before GSC moved to the biglobster profile still have it
+        # written onto main's config.yaml (the old `label == "main"` gate);
+        # actively shed it so the owner drops the biglobster.top credential and
+        # the tool can't run in the wrong lane. Idempotent on clean volumes.
+        if label == "main":
+            servers = cfg.get("mcp_servers")
+            if isinstance(servers, dict) and "gsc" in servers:
+                del servers["gsc"]
                 changed = True
         if changed:
             config_path.write_text(yaml.dump(cfg, default_flow_style=False))
