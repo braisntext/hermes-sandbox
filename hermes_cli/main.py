@@ -259,7 +259,15 @@ def _apply_profile_override() -> None:
     profile_name = None
     consume = 0
 
-    # 1. Check for explicit -p / --profile flag
+    # 1. Check for explicit -p / --profile flag.  Only honour it as the GLOBAL
+    # profile selector when it appears BEFORE the subcommand — i.e. among the
+    # leading options.  Once we reach the first positional token (the
+    # subcommand name) we stop scanning: a --profile after it belongs to that
+    # subcommand, not to the CLI.  Otherwise the pre-parser hijacks (and strips)
+    # a subcommand's own --profile — e.g. `hermes cron edit <id> --profile
+    # <name>` is meant to set the cron job's run profile, and must not switch
+    # the CLI's active profile / HERMES_HOME (which made the job lookup read the
+    # wrong store and fail with "Job not found").
     for i, arg in enumerate(argv):
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
@@ -268,6 +276,9 @@ def _apply_profile_override() -> None:
         elif arg.startswith("--profile="):
             profile_name = arg.split("=", 1)[1]
             consume = 1
+            break
+        elif not arg.startswith("-"):
+            # First positional token = the subcommand; global options end here.
             break
 
     # 1b. Reject values that can't be valid profile names (e.g. pytest's
