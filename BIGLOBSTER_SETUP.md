@@ -196,6 +196,30 @@ The Hermes container's only writable volume is `/opt/data/` (Zeabur persistent v
 
 To add repos for a new profile: create `docker/profiles/<name>/repos.txt` (one `owner/repo` per line) and rebuild the image.
 
+**Isolated BigLobster site checkouts** (auto-managed by `03-biglobster-config` section 6b at every boot):
+
+| Container path | Repo | Used by |
+|----------------|------|---------|
+| `/opt/data/checkouts/biglobster-seo` | `braisntext/biglobster` | SEO/GEO cron (job `20ec3607f2c6`) |
+| `/opt/data/checkouts/biglobster-gaphunter` | `braisntext/biglobster` | Content Gap Hunter cron |
+
+Each is an independent clone (separate `.git`, index, `HEAD`, and locally pinned
+`user.email=hermes@agent.local`). Section 6b clones on first boot, then on every
+boot normalizes the remote to tokenless HTTPS, fetches, `checkout main`, and
+`pull --ff-only` — never a hard reset, so untracked artifacts (e.g. a cover image
+mid-run) survive. This replaces the old single shared working tree that collided
+on branch + git identity between the two jobs.
+
+> **Operational steps (cron jobs live on the volume at `/opt/data/.hermes/cron/jobs.json`, not in the image).** After this change is deployed and the checkouts exist, repoint each job's workdir and trim the now-redundant prompt logic:
+>
+> ```sh
+> hermes cron update 20ec3607f2c6 --workdir /opt/data/checkouts/biglobster-seo
+> hermes cron update <gap-hunter-job-id> --workdir /opt/data/checkouts/biglobster-gaphunter
+> ```
+>
+> - **SEO prompt:** PASO 0's identity pin (`git config user.email hermes@agent.local`) is now redundant — section 6b pins it locally per checkout. A defensive `git checkout main && git pull --ff-only` at run start is still fine to keep.
+> - **Gap Hunter prompt:** add the same per-artifact commit→push discipline the SEO job uses — commit each article **together with its cover image** and push immediately, one artifact per commit. This stops orphaned untracked cover images from accumulating in the working tree (they previously lingered because Gap Hunter committed in a single batch at the end and missed binaries it had written).
+
 ---
 
 ## Available tools
