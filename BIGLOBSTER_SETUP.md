@@ -201,7 +201,7 @@ To add repos for a new profile: create `docker/profiles/<name>/repos.txt` (one `
 | Container path | Repo | Used by |
 |----------------|------|---------|
 | `/opt/data/checkouts/biglobster-seo` | `braisntext/biglobster` | SEO/GEO cron (job `20ec3607f2c6`) |
-| `/opt/data/checkouts/biglobster-gaphunter` | `braisntext/biglobster` | Content Gap Hunter cron |
+| `/opt/data/checkouts/biglobster-gaphunter` | `braisntext/biglobster` | Content Gap Hunter cron (job `ce583d11dedd`) |
 
 Each is an independent clone (separate `.git`, index, `HEAD`, and locally pinned
 `user.email=hermes@agent.local`). Section 6b clones on first boot, then on every
@@ -210,15 +210,22 @@ boot normalizes the remote to tokenless HTTPS, fetches, `checkout main`, and
 mid-run) survive. This replaces the old single shared working tree that collided
 on branch + git identity between the two jobs.
 
-> **Operational steps (cron jobs live on the volume at `/opt/data/.hermes/cron/jobs.json`, not in the image).** After this change is deployed and the checkouts exist, repoint each job's workdir and trim the now-redundant prompt logic:
+> **Operational steps (cron jobs live on the volume at `/opt/data/.hermes/cron/jobs.json`, not in the image).** After this change is deployed and the checkouts exist, repoint each job's workdir and trim the now-redundant prompt logic. The workdir-setting subcommand is `hermes cron edit` (there is no `update`):
 >
 > ```sh
-> hermes cron update 20ec3607f2c6 --workdir /opt/data/checkouts/biglobster-seo
-> hermes cron update <gap-hunter-job-id> --workdir /opt/data/checkouts/biglobster-gaphunter
+> hermes cron edit 20ec3607f2c6 --workdir /opt/data/checkouts/biglobster-seo
+> hermes cron edit ce583d11dedd --workdir /opt/data/checkouts/biglobster-gaphunter
 > ```
 >
-> - **SEO prompt:** PASO 0's identity pin (`git config user.email hermes@agent.local`) is now redundant — section 6b pins it locally per checkout. A defensive `git checkout main && git pull --ff-only` at run start is still fine to keep.
-> - **Gap Hunter prompt:** add the same per-artifact commit→push discipline the SEO job uses — commit each article **together with its cover image** and push immediately, one artifact per commit. This stops orphaned untracked cover images from accumulating in the working tree (they previously lingered because Gap Hunter committed in a single batch at the end and missed binaries it had written).
+> - **SEO prompt:** PASO 0's identity pin (`git config user.email hermes@agent.local`) is now redundant — section 6b pins it locally per checkout, so remove it. Also drop the `-C /opt/data/biglobster` from the remaining PASO 0 steps: the job's workdir is now its own checkout, so the commands must run there, not on the abandoned shared clone. The defensive run-start hygiene becomes (no `-C`, no identity line):
+>
+>   ```sh
+>   git fetch origin
+>   git checkout main
+>   git pull --ff-only origin main
+>   ```
+>
+> - **Gap Hunter prompt:** add the same per-artifact commit→push discipline the SEO job uses — commit each article **together with its cover image** and push immediately, one artifact per commit, then end the run with a `git status --porcelain` clean-tree check. This stops orphaned untracked cover images from accumulating (they previously lingered because Gap Hunter committed in a single batch at the end and missed binaries it had written). Same no-`-C` PASO 0 as the SEO job (workdir is `/opt/data/checkouts/biglobster-gaphunter`).
 
 ---
 
