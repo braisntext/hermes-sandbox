@@ -680,6 +680,47 @@ class TestRootTraceIO:
         assert root.ended is True
         assert client.flushed >= 1
 
+    def test_finish_trace_detaches_root_context(self, monkeypatch):
+        """Regression: _finish_trace must call root_ctx.__exit__ to detach the
+        OTel context that _start_root_trace attached via root_ctx.__enter__().
+
+        Leaking it (the pre-fix behavior — only root_span.end() was called)
+        left the attachment to be torn down by GC at interpreter shutdown in a
+        different context, raising the noisy "Token was created in a different
+        Context" / GeneratorExit cascade in errors.log on every SIGTERM."""
+        mod = self._make_mod(monkeypatch)
+        client = _RecordingLangfuse()
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+
+        exits = []
+
+        class _TrackingRootCtx:
+            ended = False
+
+            def __exit__(self, *exc):
+                exits.append(exc)
+                return False
+
+            def set_trace_io(self, **kw):
+                pass
+
+            def update(self, **kw):
+                pass
+
+            def end(self):
+                self.ended = True
+
+        ctx = _TrackingRootCtx()
+        state = mod.TraceState(trace_id="t", root_ctx=ctx, root_span=ctx)
+        task_key = mod._trace_key("task-1", "sess-1")
+        monkeypatch.setitem(mod._TRACE_STATE, task_key, state)
+
+        mod._finish_trace(task_key, output="done")
+
+        assert ctx.ended is True, "root span was not ended"
+        assert exits, "_finish_trace did not call root_ctx.__exit__ (OTel context leak)"
+        assert exits[0] == (None, None, None)
+
 
 class TestToolObservationKeying:
     """Tests for pre/post tool_call observation matching when tool_call_id is absent."""

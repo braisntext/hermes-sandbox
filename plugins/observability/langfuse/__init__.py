@@ -672,6 +672,23 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:
+        # Detach the OTel context that _start_root_trace attached via
+        # root_ctx.__enter__(). The observation was opened with
+        # end_on_exit=False, so __exit__ does NOT re-end the span (already
+        # ended above) — it only pops the attached context. Skipping it leaks
+        # the attachment, which is later torn down by GC at interpreter
+        # shutdown in a *different* context and raises the noisy
+        # "Token was created in a different Context" / GeneratorExit cascade
+        # in errors.log on every SIGTERM. Detaching here, at end of turn,
+        # closes it in (or close to) the context that opened it; if dispatch
+        # crossed a worker thread the detach may still fail, so swallow it
+        # quietly rather than let it explode at shutdown.
+        root_ctx = getattr(state, "root_ctx", None)
+        if root_ctx is not None:
+            try:
+                root_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
         try:
             client.flush()
         except Exception:
