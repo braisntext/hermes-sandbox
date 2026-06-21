@@ -200,6 +200,12 @@ overrides = {
     ("video_gen", "provider"): "huggingface",
     ("memory", "memory_char_limit"): 6000,
     ("memory", "user_char_limit"): 3000,
+    # Tool-iteration budget per agent run. Cron uses this as max_iterations
+    # (cron/scheduler.py), and 60 was too tight for heavy jobs like the SEO/GEO
+    # cron — they exhausted it mid-run, so the run ended completed=False and the
+    # model's summary surfaced as a RuntimeError. Raised to 90 (run_agent's own
+    # default). Enforced on main + every profile so the budget is uniform.
+    ("agent", "max_turns"): 90,
 }
 default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
 
