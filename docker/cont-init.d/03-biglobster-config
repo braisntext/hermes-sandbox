@@ -203,6 +203,75 @@ overrides = {
 }
 default_model = os.environ.get("HERMES_DEFAULT_MODEL", "")
 
+# Source of truth for which Telegram thread each profile owns: the per-profile
+# routing.env bundled in the image. The same file already drives outbound
+# delivery (TELEGRAM_HOME_CHANNEL_THREAD_ID, injected into each profile's .env);
+# we reuse it to derive the INBOUND topic->profile bindings too.
+PROFILES_SRC = Path("/opt/hermes/docker/profiles")
+
+def _reconcile_group_topics(cfg):
+    """Ensure inbound topic->profile bindings exist in
+    telegram.extra.group_topics, derived from each bundled profile's
+    routing.env. The live bindings were only ever set by hand (via the panel),
+    so a fresh/rebuilt volume would lose all topic routing — every message would
+    fall through to the default profile. Rebuilding them here makes routing
+    reproducible from the image (DR) and back-fills any missing binding on
+    existing volumes. Conservative: only ADDS a chat/topic entry or corrects a
+    topic's `profile`; never removes user-defined topics, renames existing ones,
+    or touches other telegram config (allowed_chats, reactions, token, ...).
+    Returns True if cfg changed."""
+    if not PROFILES_SRC.is_dir():
+        return False
+    changed = False
+    for renv in sorted(PROFILES_SRC.glob("*/routing.env")):
+        pname = renv.parent.name
+        vals = {}
+        for line in renv.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                vals[k.strip()] = v.strip()
+        chat = vals.get("TELEGRAM_HOME_CHANNEL")
+        thread = vals.get("TELEGRAM_HOME_CHANNEL_THREAD_ID")
+        if not chat or not thread:
+            continue
+        try:
+            thread = int(thread)
+        except ValueError:
+            continue
+        tg = cfg.setdefault("telegram", {})
+        if not isinstance(tg, dict):
+            return changed
+        extra = tg.setdefault("extra", {})
+        if not isinstance(extra, dict):
+            return changed
+        gts = extra.get("group_topics")
+        if not isinstance(gts, list):
+            gts = []
+            extra["group_topics"] = gts
+        chat_entry = next(
+            (e for e in gts if isinstance(e, dict) and str(e.get("chat_id")) == str(chat)),
+            None,
+        )
+        if chat_entry is None:
+            chat_entry = {"chat_id": chat, "topics": []}
+            gts.append(chat_entry)
+            changed = True
+        topics = chat_entry.setdefault("topics", [])
+        if not isinstance(topics, list):
+            continue
+        topic = next(
+            (t for t in topics if isinstance(t, dict) and t.get("thread_id") == thread),
+            None,
+        )
+        if topic is None:
+            topics.append({"name": pname, "profile": pname, "thread_id": thread})
+            changed = True
+        elif topic.get("profile") != pname:
+            topic["profile"] = pname
+            changed = True
+    return changed
+
 def _reconcile_config(config_path, label):
     if not config_path.exists():
         print(f"[03-biglobster] {label}: config.yaml not present yet — skipping")
@@ -296,6 +365,11 @@ def _reconcile_config(config_path, label):
             servers = cfg.get("mcp_servers")
             if isinstance(servers, dict) and "gsc" in servers:
                 del servers["gsc"]
+                changed = True
+            # Inbound topic->profile routing lives only on the main profile's
+            # config. Rebuild it from the profiles' routing.env so it survives a
+            # volume rebuild (DR) and back-fills missing bindings.
+            if _reconcile_group_topics(cfg):
                 changed = True
         if changed:
             config_path.write_text(yaml.dump(cfg, default_flow_style=False))
