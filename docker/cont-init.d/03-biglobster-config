@@ -626,7 +626,7 @@ fi
 BIGLOBSTER_SITE_REPO="braisntext/biglobster"
 checkouts_root="$HERMES_HOME/checkouts"
 as_hermes mkdir -p "$checkouts_root"
-for ckdir in biglobster-seo biglobster-gaphunter; do
+for ckdir in biglobster-seo biglobster-gaphunter biglobster-infographic; do
     target="$checkouts_root/$ckdir"
     if [ -d "$target/.git" ]; then
         # Normalize to a tokenless remote (same rationale as section 6).
