@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Hermes managed pre-commit — single source of truth for the agent git guard.
+#
+# Lives in the Hermes image at /opt/hermes/scripts/git-guard and is wired into
+# every agent clone by docker/cont-init.d/03-biglobster-config, which sets
+#   git config core.hooksPath /opt/hermes/scripts/git-guard
+# in each workspace clone and isolated checkout on every boot. Because it ships
+# in the image, every deploy updates it everywhere at once — nothing is committed
+# into the project repos and there is no per-repo copy to drift.
+#
+# Two layers:
+#   1. Universal, config-free mass-deletion tripwire (check-mass-deletion.sh).
+#      The 2026-06-22 cover-wipe (dd0e1f5, 48 image deletions) would have been
+#      blocked here.
+#   2. Per-project broken-refs / asset checks: chains to the repo's OWN
+#      .githooks/pre-commit if present (e.g. biglobster's validate-assets.sh).
+#      core.hooksPath now points here instead of at <repo>/.githooks, so we must
+#      invoke the repo's committed hook explicitly to keep it firing.
+#
+# On block, a signal line is appended to
+#   $HERMES_HOME/incidents/blocked-commits.jsonl
+# which the hourly incident watcher (incidents/sweep.py, PR #46) reports to the
+# incidents Telegram thread (1904). No bot token is handled here.
+#
+# Account is GitHub Free + private => no Actions, no branch protection, no
+# server-side hooks. This client-side hook is the WHOLE enforcement path.
+set -euo pipefail
+
+guard_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+self="$guard_dir/$(basename "${BASH_SOURCE[0]}")"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Append a one-line JSON incident signal for the watcher. Best-effort: never let
+# a logging failure interfere with the commit decision.
+alert() {  # $1 = reason
+  local home dir ts repo
+  home="${HERMES_HOME:-/opt/data}"
+  dir="$home/incidents"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+  repo="$(git config --get remote.origin.url 2>/dev/null || echo "$repo_root")"
+  printf '{"ts":"%s","repo":"%s","cwd":"%s","reason":"%s"}\n' \
+    "$ts" "$repo" "$repo_root" "$1" >> "$dir/blocked-commits.jsonl" 2>/dev/null || true
+}
+
+# --- 1: universal mass-deletion tripwire ---
+if ! bash "$guard_dir/check-mass-deletion.sh"; then
+  alert "mass-deletion guard blocked a commit"
+  exit 1
+fi
+
+# --- 2: per-project chain (repo's own committed pre-commit) ---
+repo_hook="$repo_root/.githooks/pre-commit"
+if [ -f "$repo_hook" ] && [ "$(cd "$(dirname "$repo_hook")" && pwd)/$(basename "$repo_hook")" != "$self" ]; then
+  if ! bash "$repo_hook"; then
+    alert "project pre-commit check blocked a commit"
+    exit 1
+  fi
+fi
+
+exit 0
