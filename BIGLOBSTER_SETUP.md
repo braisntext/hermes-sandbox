@@ -91,6 +91,10 @@ Observed 2026-06-09 and root-caused to **model latency, not infrastructure**. Tr
 
 Cron prompts are scanned (`tools/cronjob_tools.py`). A `curl`/`wget` combined with a secret variable (`$…KEY/TOKEN/SECRET/API…`) in the URL, in `--data`, or in an `Authorization` header is **blocked** (`exfil_curl_*` patterns) and the job won't run. To hit GitHub or any API from a cron job, use the **native tools** — `gh pr create`, the github skills, `web`/exa — since git and `gh` are already authenticated in the container. Never hand-roll a `curl` with a token in a cron prompt.
 
+## Agent git commit guard
+
+A client-side pre-commit guard (`scripts/git-guard/`, installed into every agent clone via `core.hooksPath` in `03-biglobster-config` §6c) blocks the **blind `git add -A` mass-deletion** class that 404'd the blog for ~22h on 2026-06-22 (commit `dd0e1f5`, 48 deleted cover images). It blocks any commit deleting more than `N` tracked files (default 10; override `HERMES_ALLOW_MASS_DELETION=1`) and chains to each repo's own `.githooks/pre-commit` for per-project broken-ref checks (biglobster's `validate-assets.sh`). Blocked commits alert the incidents Telegram thread via the watcher. `git commit --no-verify` is hard-blocked so the guard can't be bypassed. The account is GitHub Free + private, so this client-side hook is the **only** enforcement path (no Actions / branch protection / server hooks). Full design: [`docs/security/git-commit-guard.md`](docs/security/git-commit-guard.md).
+
 ---
 
 ## Zeabur environment variables (Hermes service)

@@ -237,6 +237,19 @@ HARDLINE_PATTERNS = [
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
+    # `git commit --no-verify` / `-n` bypasses pre-commit hooks, which on the
+    # Hermes volumes are the WHOLE enforcement path against the 2026-06-22
+    # cover-wipe class (GitHub Free + private => no Actions / branch protection /
+    # server hooks). Allowing the agent to skip the hook defeats the guard
+    # entirely, so this is unconditional. The `--no-verify` form is matched
+    # anywhere after `commit`; the short `-n` form is matched only before any
+    # quote so it never trips on a `-n` inside a commit message. (biglobster's
+    # own post-commit doc-sync uses --no-verify INSIDE the hook subprocess, not
+    # via the terminal tool, so it is unaffected.)
+    (r'\bgit\b[^;&|\n`]*\bcommit\b[^;&|\n`]*--no-verify\b',
+     "git commit --no-verify (bypasses the commit guard)"),
+    (r'\bgit\b[^;&|\n`]*\bcommit\b[^;&|\n`\'"]*\s-[a-z]*n[a-z]*\b',
+     "git commit -n / --no-verify (bypasses the commit guard)"),
 ]
 
 # Pre-compiled variant used by the hot-path matcher. Building these at module

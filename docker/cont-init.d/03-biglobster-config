@@ -658,6 +658,53 @@ for ckdir in biglobster-seo biglobster-gaphunter biglobster-infographic; do
     fi
 done
 
+# --- 6c: install the managed git guard into every agent clone (every boot) ---
+# Why: on 2026-06-22 a blind `git add -A && git commit` (commit dd0e1f5) captured
+# the deletion of 48 cover/infographic images in braisntext/biglobster while the
+# HTML still referenced them — pushed straight to main, blog 404'd for ~22h.
+# Root-cause class: blind `git add -A` in agent git flows + a shared mutable
+# working tree where rebase/build state leaks in. This makes that class
+# uncommittable in EVERY agent clone, not just biglobster.
+#
+# Mechanism: point each clone's core.hooksPath at the image-shipped guard. The
+# managed pre-commit (1) blocks a commit deleting more than N tracked files
+# (config-free, override HERMES_ALLOW_MASS_DELETION=1) and (2) chains to the
+# repo's own .githooks/pre-commit for per-project broken-ref checks (biglobster's
+# validate-assets.sh); the managed post-commit chains to the repo's post-commit
+# (biglobster doc-sync). A blocked commit appends a signal to
+# incidents/blocked-commits.jsonl, which the hourly incident watcher reports to
+# the incidents Telegram thread.
+#
+# Single source of truth: $INSTALL_DIR/scripts/git-guard ships in the image and
+# updates with every deploy — nothing is committed into the project repos, no
+# per-repo copy to drift. The account is GitHub Free + private (no Actions /
+# branch protection / pre-receive hooks), so this client-side install is the
+# WHOLE enforcement path. Idempotent + non-fatal, like the rest of this script.
+# Covers the per-profile workspace clones (section 6, incl. finview) and the
+# isolated site checkouts (section 6b). The checkpoint shadow store lives under
+# $HERMES_HOME/checkpoints — not under these roots — so it is untouched.
+GIT_GUARD_DIR="$INSTALL_DIR/scripts/git-guard"
+if [ -d "$GIT_GUARD_DIR" ]; then
+    chmod +x "$GIT_GUARD_DIR"/pre-commit "$GIT_GUARD_DIR"/post-commit \
+        "$GIT_GUARD_DIR"/check-mass-deletion.sh 2>/dev/null || true
+    install_guard() {  # $1 = path to a git working tree
+        [ -d "$1/.git" ] || return 0
+        if HOME="$HERMES_HOME" as_hermes git -C "$1" config core.hooksPath "$GIT_GUARD_DIR" 2>/dev/null; then
+            echo "[03-biglobster] git guard installed: $1"
+        else
+            echo "[03-biglobster] Warning: git guard install failed for $1 (non-fatal)"
+        fi
+    }
+    for ws_repo in "$HERMES_HOME"/profiles/*/workspace/*/; do
+        install_guard "${ws_repo%/}"
+    done
+    for ck in "$HERMES_HOME"/checkouts/*/; do
+        install_guard "${ck%/}"
+    done
+else
+    echo "[03-biglobster] Warning: git guard dir $GIT_GUARD_DIR missing — guard NOT installed"
+fi
+
 # --- 7: egress diagnostics (non-fatal) ---
 echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
 # Probe the real router endpoint (/v1/models returns 200 without auth); the

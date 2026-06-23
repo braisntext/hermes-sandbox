@@ -38,6 +38,7 @@ HEARTBEAT_HOURS = 24
 CRON_FAILURE_WINDOW_HOURS = 26  # a failure stays "current" until the job runs again
 LANGFUSE_WINDOW_HOURS = 2
 _SEEN_CAP = 2000
+_BLOCKED_CAP = 500  # cap on retained blocked-commit signal lines
 
 
 @dataclass
@@ -56,6 +57,11 @@ def _now() -> datetime:
 def _state_path() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home() / "incidents" / "state.json"
+
+
+def _blocked_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "incidents" / "blocked-commits.jsonl"
 
 
 def _load_state(path: Path) -> dict:
@@ -158,6 +164,61 @@ def langfuse_error_incidents(*, now: Optional[datetime] = None,
     return out
 
 
+def blocked_commit_incidents(path: Optional[Path] = None) -> List[Incident]:
+    """Read the git-guard signal file and surface each blocked agent commit.
+
+    The managed pre-commit hook (scripts/git-guard/pre-commit) appends one JSON
+    line per blocked commit to ``$HERMES_HOME/incidents/blocked-commits.jsonl``.
+    This is the alert path for the 2026-06-22 cover-wipe class: the commit is
+    blocked locally AND reported here so the failure is visible, not silent.
+
+    Best-effort: a malformed or missing file yields []. Dedup is by the existing
+    seen-state (stable id per signal), so a block is reported once.
+    """
+    path = path or _blocked_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+
+    out: List[Incident] = []
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except Exception:
+            continue
+        ts = str(rec.get("ts") or "unknown")
+        repo = str(rec.get("repo") or rec.get("cwd") or "unknown")
+        reason = str(rec.get("reason") or "agent commit blocked by git guard")
+        cwd = str(rec.get("cwd") or "")
+        out.append(Incident(
+            id=f"blocked:{ts}:{cwd}:{reason[:40]}",
+            kind="blocked_commit",
+            title="Blocked agent commit (git guard)",
+            detail=f"when: {ts}\nrepo: {repo}\nreason: {reason}",
+            handoff=f"blocked commit in {repo} — review what the agent tried to delete/break",
+        ))
+    return out
+
+
+def _prune_blocked(path: Path, cap: int = _BLOCKED_CAP) -> None:
+    """Keep the signal file bounded. Reported ids persist in seen-state, so
+    trimming the oldest lines never re-surfaces an already-reported block."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    if len(lines) <= cap:
+        return
+    try:
+        path.write_text("\n".join(lines[-cap:]) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _format_brief(inc: Incident) -> str:
     return (
         f"🔴 *Incident* — {inc.title}\n"
@@ -179,7 +240,8 @@ def _heartbeat_due(last_hb: Optional[str], now: datetime) -> bool:
 
 
 def sweep(*, now: Optional[datetime] = None, jobs: Optional[List[dict]] = None,
-          langfuse: Optional[List[Incident]] = None, state_path: Optional[Path] = None,
+          langfuse: Optional[List[Incident]] = None,
+          blocked: Optional[List[Incident]] = None, state_path: Optional[Path] = None,
           dry_run: bool = False) -> str:
     """Run one sweep. Returns the text to deliver ("" = stay silent)."""
     now = now or _now()
@@ -196,8 +258,9 @@ def sweep(*, now: Optional[datetime] = None, jobs: Optional[List[dict]] = None,
         except Exception:
             jobs = []
     lf = langfuse if langfuse is not None else langfuse_error_incidents(now=now)
+    bc = blocked if blocked is not None else blocked_commit_incidents()
 
-    incidents = cron_failure_incidents(jobs, now=now) + list(lf)
+    incidents = cron_failure_incidents(jobs, now=now) + list(lf) + list(bc)
     new = [i for i in incidents if i.id not in seen]
 
     output = ""
@@ -215,6 +278,8 @@ def sweep(*, now: Optional[datetime] = None, jobs: Optional[List[dict]] = None,
         state["seen"] = seen_list[-_SEEN_CAP:]
         state["last_heartbeat_at"] = last_hb
         _save_state(state_path, state)
+    if not dry_run and blocked is None:
+        _prune_blocked(_blocked_path())
     return output
 
 

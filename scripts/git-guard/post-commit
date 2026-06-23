@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# Hermes managed post-commit — chains to the repo's own .githooks/post-commit.
+#
+# core.hooksPath points at this directory (not at <repo>/.githooks), so a repo
+# that ships its own post-commit (e.g. biglobster's model-config doc-sync) would
+# stop firing unless we invoke it explicitly. This preserves that behaviour.
+set -euo pipefail
+
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+repo_hook="$repo_root/.githooks/post-commit"
+
+if [ -f "$repo_hook" ] && [ "$(cd "$(dirname "$repo_hook")" && pwd)/$(basename "$repo_hook")" != "$self" ]; then
+  exec bash "$repo_hook"
+fi
+exit 0
