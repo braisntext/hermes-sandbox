@@ -561,6 +561,17 @@ if [ -n "$AUDITOR_TOKEN" ] && [ -f "$HERMES_HOME/profiles/auditor/SOUL.md" ]; th
     chmod 600 "$auditor_home/.git-credentials"
     chown hermes:hermes "$auditor_home/.git-credentials" 2>/dev/null || true
     echo "[03-biglobster] Auditor git credential pinned to hermes-auditor identity"
+    # gh CLI auth: on-disk hosts.yml so `gh` authenticates WITHOUT an env token.
+    # The cron lane does not export GH_TOKEN into the terminal subprocess (only
+    # git's on-disk .git-credentials is honoured there), so without this every
+    # `gh pr ...` 401s and the auditor cron flails (prod 2026-06-24). gh reads
+    # $HOME/.config/gh/hosts.yml, and the auditor's subprocess HOME is here.
+    as_hermes mkdir -p "$auditor_home/.config/gh"
+    printf 'github.com:\n    oauth_token: %s\n    git_protocol: https\n    user: hermes-auditor\n' "$AUDITOR_TOKEN" \
+        > "$auditor_home/.config/gh/hosts.yml"
+    chmod 600 "$auditor_home/.config/gh/hosts.yml"
+    chown -R hermes:hermes "$auditor_home/.config" 2>/dev/null || true
+    echo "[03-biglobster] Auditor gh hosts.yml provisioned"
 fi
 
 # --- 5: seed per-profile bootstrap files from docker/profiles/<name>/ (once) ---
