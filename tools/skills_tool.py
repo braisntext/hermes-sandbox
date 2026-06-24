@@ -84,11 +84,40 @@ from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
 logger = logging.getLogger(__name__)
 
 
-# All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
-# This is the single source of truth -- agent edits, hub installs, and bundled
-# skills all coexist here without polluting the git repo.
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
+# All skills live in <HERMES_HOME>/skills/ (seeded from bundled skills/ on
+# install). This is the single source of truth -- agent edits, hub installs,
+# and bundled skills all coexist here without polluting the git repo.
+#
+# HERMES_HOME / SKILLS_DIR are resolved DYNAMICALLY (not cached at import) so a
+# per-job profile override (cron jobs with a `profile` field set a context-local
+# Hermes home) is honored at call time. Caching them at import froze the long-
+# lived gateway/scheduler process to whatever profile was active on first import
+# (usually `default`), so a biglobster/finview profile cron could never see its
+# own profile-scoped skills. Internal code must call ``_skills_dir()`` /
+# ``_hermes_home()`` rather than the bare names; the module ``__getattr__`` below
+# exposes ``HERMES_HOME`` / ``SKILLS_DIR`` for external readers and test patching.
+
+
+def _hermes_home() -> Path:
+    """Active Hermes home, honoring a test patch of ``HERMES_HOME`` if present."""
+    patched = globals().get("HERMES_HOME")
+    return patched if patched is not None else get_hermes_home()
+
+
+def _skills_dir() -> Path:
+    """Active skills dir, honoring a test patch of ``SKILLS_DIR`` if present."""
+    patched = globals().get("SKILLS_DIR")
+    return patched if patched is not None else _hermes_home() / "skills"
+
+
+def __getattr__(name: str):
+    # PEP 562 module-level attribute hook: resolve these dynamically when they
+    # are not shadowed by a real module attribute (e.g. a test ``patch()``).
+    if name == "HERMES_HOME":
+        return get_hermes_home()
+    if name == "SKILLS_DIR":
+        return get_hermes_home() / "skills"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
@@ -451,9 +480,9 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     For paths like: ~/.hermes/skills/mlops/axolotl/SKILL.md -> "mlops"
     Also works for external skill dirs configured via skills.external_dirs.
     """
-    # Try the module-level SKILLS_DIR first (respects monkeypatching in tests),
+    # Try the active skills dir first (respects monkeypatching in tests),
     # then fall back to external dirs from config.
-    dirs_to_check = [SKILLS_DIR]
+    dirs_to_check = [_skills_dir()]
     try:
         from agent.skill_utils import get_external_skills_dirs
         dirs_to_check.extend(get_external_skills_dirs())
@@ -568,8 +597,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     # Scan local dir first, then external dirs (local takes precedence)
     dirs_to_scan = []
-    if SKILLS_DIR.exists():
-        dirs_to_scan.append(SKILLS_DIR)
+    _local = _skills_dir()
+    if _local.exists():
+        dirs_to_scan.append(_local)
     dirs_to_scan.extend(get_external_skills_dirs())
 
     for scan_dir in dirs_to_scan:
@@ -644,8 +674,9 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         JSON string with minimal skill info: name, description, category
     """
     try:
-        if not SKILLS_DIR.exists():
-            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        _local = _skills_dir()
+        if not _local.exists():
+            _local.mkdir(parents=True, exist_ok=True)
             return json.dumps(
                 {
                     "success": True,
@@ -898,8 +929,9 @@ def skill_view(
 
         # Build list of all skill directories to search
         all_dirs = []
-        if SKILLS_DIR.exists():
-            all_dirs.append(SKILLS_DIR)
+        _local = _skills_dir()
+        if _local.exists():
+            all_dirs.append(_local)
         all_dirs.extend(get_external_skills_dirs())
 
         if not all_dirs:
@@ -1019,7 +1051,7 @@ def skill_view(
         # Security: warn if skill is loaded from outside trusted directories
         # (local skills dir + configured external_dirs are all trusted)
         _outside_skills_dir = True
-        _trusted_dirs = [SKILLS_DIR.resolve()]
+        _trusted_dirs = [_skills_dir().resolve()]
         try:
             _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
         except Exception:
@@ -1248,7 +1280,7 @@ def skill_view(
             linked_files["scripts"] = script_files
 
         try:
-            rel_path = str(skill_md.relative_to(SKILLS_DIR))
+            rel_path = str(skill_md.relative_to(_skills_dir()))
         except ValueError:
             # External skill — use path relative to the skill's own parent dir
             rel_path = str(skill_md.relative_to(skill_md.parent.parent)) if skill_md.parent.parent else skill_md.name
