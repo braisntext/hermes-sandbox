@@ -186,6 +186,50 @@ if profiles_root.is_dir():
         _sync_env_file(prof / ".env")
         print(f"[03-biglobster] Synced env vars into {prof / '.env'}")
 
+# 1b. Auditor profile uses its OWN GitHub identity (hermes-auditor), never the
+#     shared agent token. The sync loop above just stamped the shared
+#     GITHUB_TOKEN/GH_TOKEN into profiles/auditor/.env; override them here from
+#     HERMES_AUDITOR_GITHUB_TOKEN so the auditor's gh/git act as the bot account
+#     that reviews the PRs (a reviewer must be a distinct identity from the
+#     authors). Invariant: the auditor profile holds ONLY the bot token, never
+#     the shared one. Resolve from os.environ first, then the durable main .env
+#     (mirrors the GITHUB_TOKEN resolution in the shell preamble). No-op if the
+#     profile or the token is absent.
+auditor_token = os.environ.get("HERMES_AUDITOR_GITHUB_TOKEN", "")
+if not auditor_token and (home / ".env").exists():
+    _m = re.search(r"^HERMES_AUDITOR_GITHUB_TOKEN=(.*)$",
+                   (home / ".env").read_text(encoding="utf-8"), flags=re.MULTILINE)
+    auditor_token = _m.group(1).strip() if _m else ""
+_auditor_env = profiles_root / "auditor" / ".env"
+if auditor_token and (profiles_root / "auditor" / "SOUL.md").exists():
+    _c = _auditor_env.read_text(encoding="utf-8") if _auditor_env.exists() else ""
+    for _v in ("GITHUB_TOKEN", "GH_TOKEN"):
+        _c = re.sub(rf"^{_v}=.*(?:\n|$)", "", _c, flags=re.MULTILINE)
+    if _c and not _c.endswith("\n"):
+        _c += "\n"
+    _c += f"GITHUB_TOKEN={auditor_token}\nGH_TOKEN={auditor_token}\n"
+    _auditor_env.write_text(_c, encoding="utf-8")
+    print("[03-biglobster] Auditor profile pinned to hermes-auditor GitHub identity")
+
+# 1c. Auditor review-model knobs. Two env vars let the CEO swap the system- and
+#     content-tier review models from Zeabur without a redeploy (auditor/llm.py
+#     reads them at call time). Stamp whatever is set in the container env into
+#     the auditor .env so the cron's agent subprocess inherits them; if unset,
+#     auditor/llm.py falls back to its documented cheap defaults. Auditor-only —
+#     deliberately NOT in the shared `inject` list (other profiles don't review).
+if (profiles_root / "auditor" / "SOUL.md").exists():
+    _ae = profiles_root / "auditor" / ".env"
+    _c = _ae.read_text(encoding="utf-8") if _ae.exists() else ""
+    for _mv in ("HERMES_AUDITOR_SYSTEM_MODEL", "HERMES_AUDITOR_CONTENT_MODEL"):
+        _val = os.environ.get(_mv, "").strip()
+        if not _val:
+            continue
+        _c = re.sub(rf"^{_mv}=.*(?:\n|$)", "", _c, flags=re.MULTILINE)
+        if _c and not _c.endswith("\n"):
+            _c += "\n"
+        _c += f"{_mv}={_val}\n"
+    _ae.write_text(_c, encoding="utf-8")
+
 # 2. Re-assert runtime-critical config keys (idempotent). docker/config.yaml
 #    is the first-boot source of truth; here we only force the keys that must
 #    track the intended deploy even on volumes seeded before a change.
@@ -490,6 +534,33 @@ if [ -n "$GITHUB_TOKEN" ]; then
     fi
 else
     echo "[03-biglobster] GITHUB_TOKEN not set — git HTTPS credential skipped"
+fi
+
+# --- 4b: auditor profile git auth — pin to the hermes-auditor bot token ---
+# The auditor reviews (and, once trusted, pushes fix commits) under its OWN
+# GitHub identity, distinct from the agents it reviews. Resolve
+# HERMES_AUDITOR_GITHUB_TOKEN (env first, then the durable main .env, mirroring
+# the GITHUB_TOKEN resolution in the preamble) and write it ONLY into the auditor
+# profile's subprocess home — the shared agent token must never reach the auditor
+# identity. Independent of the shared-token branch above so it runs even when
+# GITHUB_TOKEN is unset. Non-fatal + idempotent, matching the script's contract.
+AUDITOR_TOKEN="${HERMES_AUDITOR_GITHUB_TOKEN:-}"
+if [ -z "$AUDITOR_TOKEN" ] && [ -f "$HERMES_HOME/.env" ]; then
+    AUDITOR_TOKEN=$(grep -E '^HERMES_AUDITOR_GITHUB_TOKEN=' "$HERMES_HOME/.env" 2>/dev/null \
+        | tail -n1 | cut -d= -f2-)
+fi
+auditor_home="$HERMES_HOME/profiles/auditor/home"
+if [ -n "$AUDITOR_TOKEN" ] && [ -f "$HERMES_HOME/profiles/auditor/SOUL.md" ]; then
+    as_hermes mkdir -p "$auditor_home"
+    HOME="$auditor_home" as_hermes git config --global credential.helper store \
+        || echo "[03-biglobster] Warning: git config failed for auditor (non-fatal)"
+    HOME="$auditor_home" as_hermes git config --global user.name "hermes-auditor" 2>/dev/null || true
+    HOME="$auditor_home" as_hermes git config --global user.email \
+        "${HERMES_AUDITOR_GIT_EMAIL:-hermes-auditor@users.noreply.github.com}" 2>/dev/null || true
+    printf 'https://x-access-token:%s@github.com\n' "$AUDITOR_TOKEN" > "$auditor_home/.git-credentials"
+    chmod 600 "$auditor_home/.git-credentials"
+    chown hermes:hermes "$auditor_home/.git-credentials" 2>/dev/null || true
+    echo "[03-biglobster] Auditor git credential pinned to hermes-auditor identity"
 fi
 
 # --- 5: seed per-profile bootstrap files from docker/profiles/<name>/ (once) ---
