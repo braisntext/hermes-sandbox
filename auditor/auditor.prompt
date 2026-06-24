@@ -28,6 +28,17 @@ PASO 2 — For each PR in the list:
          python -c "import json,sys;from auditor.tiers import classify;print(classify(json.loads(sys.argv[1])))" '<changed_files JSON>'
      This `<tier>` (`system` | `content`) selects the review model.
   c. Read the actual diff:  `gh pr diff <number>`
+  c2. Check mergeability — the gate must never pass a PR that cannot merge:
+         gh pr view <number> --json mergeable,mergeStateStatus
+      If `mergeable` is `CONFLICTING` (or `mergeStateStatus` is `DIRTY`), this PR
+      conflicts with `main`. Treat it as a MERGE BLOCKER regardless of how clean
+      the code review is. Identify the conflicting files — best effort:
+      `git fetch -q origin main && git merge-tree origin/main <headRefOid>` lists
+      the real conflicts if your clone supports it; otherwise name the PR's
+      changed files that also moved on `main`. Feed this conflict context into the
+      review message (step d) so the model proposes a concrete resolution.
+      DRY-RUN: report + propose ONLY — NEVER push a merge or resolution to the
+      branch (auto-resolution is a Phase-3 capability, gated with merge authority).
   d. Get the review from the tier's model (LLM-as-judge). Compose ONE message
      that states your BLOCK rubric (correctness, race/ordering, blast radius,
      security, guard regression, broken invariant, missing tests) and the PR
@@ -42,6 +53,9 @@ PASO 2 — For each PR in the list:
        (DRY-RUN: do NOT `gh pr merge`. Approving means "I would merge this".)
      - Blockers → REQUEST CHANGES: for each, `file:line — what — why it matters —
        suggested fix`. Be concrete.
+     - Merge conflicts → ⚠️ MERGE BLOCKER: state it cannot merge as-is, list the
+       conflicting files, and give the proposed resolution. Do NOT approve a
+       conflicting PR even if the code is sound; do NOT push the resolution.
      - Judgement call → say so, give your recommendation, and ESCALATE (PASO 3).
   f. Record that you reviewed this head so you don't repeat it:
          python -m auditor.pending --mark <number> <headRefOid>
