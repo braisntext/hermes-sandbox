@@ -78,9 +78,27 @@ STEP 3 — Find ONE authentic off-site opportunity for that query:
        3) Actionable today  — needs no new account (works with X / no login) vs.
                               worth creating an account for.
        4) Effort to post    — a 2-minute paste vs. a thread you'd have to nurture.
-   Pick the single best. If the winner needs an account BigLobster does NOT have
-   (only X exists), STILL surface it but clearly flag the account requirement —
-   never assume a login that doesn't exist.
+
+   Before committing, OPEN each top candidate's live page and VERIFY it is
+   POSTABLE — mandatory; an unpostable thread is a wasted run:
+       • Open for new replies — reject anything closed, locked, archived, or
+         read-only. On Discourse (n8n Community & most forums) reject a topic
+         showing "This topic is closed / New replies are no longer allowed" or
+         any closed/archived banner — these auto-close after inactivity. On
+         Reddit reject "locked" or "archived" posts. On Quora reject merged or
+         needs-improvement questions. On a listicle, confirm edits/comments are
+         actually open.
+       • Reachable and on-topic — not 404/deleted, still matches our answer.
+       • Recent enough to be seen — prefer activity in the last ~90 days; an old
+         but OPEN thread is fine, a closed one never is.
+   Verify by READING the live page, not a search snippet. If the top candidate
+   fails, drop it and validate the next-best. Only recommend a thread you have
+   CONFIRMED is open for new replies right now; if none pass, treat it as no
+   opportunity (Guardrail 3 — "Nothing worth pitching today").
+
+   Pick the single best that PASSED validation. If it needs an account BigLobster
+   does NOT have (only X exists), STILL surface it but clearly flag the account
+   requirement — never assume a login that doesn't exist.
 
 STEP 4 — Draft the paste-ready asset (Spanish, brand voice):
    Write the actual text to post — sized and styled for that specific platform
@@ -94,7 +112,8 @@ STEP 5 — Record & report:
       opportunity URL.
    b. Output the GEO Opportunity Brief (the cron delivers it; do NOT self-send):
         • Target query — and one line on why it has GEO/citation value
-        • Opportunity — platform + exact thread/page URL + why BigLobster fits
+        • Opportunity — platform + exact thread/page URL + why BigLobster fits,
+          and thread status (CONFIRMED open for replies + last-activity date)
         • Account needed? — "ready with X / no login" or "create a <platform>
           account first (we only have X today)"
         • Paste-ready asset — the full Spanish text, clearly delimited
