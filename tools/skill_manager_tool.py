@@ -104,9 +104,36 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
 import yaml
 
 
-# All skills live in ~/.hermes/skills/ (single source of truth)
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
+# All skills live in <HERMES_HOME>/skills/ (single source of truth).
+#
+# Resolved DYNAMICALLY (not cached at import) so a per-job profile override
+# (cron jobs with a `profile` field set a context-local Hermes home) is honored
+# at call time. Caching froze the long-lived gateway/scheduler process to the
+# profile active on first import, so a profile cron could not edit/find its own
+# profile-scoped skills. Internal code calls ``_skills_dir()`` / ``_hermes_home()``;
+# the module ``__getattr__`` exposes the names for external readers / test patching.
+
+
+def _hermes_home() -> Path:
+    """Active Hermes home, honoring a test patch of ``HERMES_HOME`` if present."""
+    patched = globals().get("HERMES_HOME")
+    return patched if patched is not None else get_hermes_home()
+
+
+def _skills_dir() -> Path:
+    """Active skills dir, honoring a test patch of ``SKILLS_DIR`` if present."""
+    patched = globals().get("SKILLS_DIR")
+    return patched if patched is not None else _hermes_home() / "skills"
+
+
+def __getattr__(name: str):
+    # PEP 562: resolve dynamically unless shadowed by a real attr (test patch).
+    if name == "HERMES_HOME":
+        return get_hermes_home()
+    if name == "SKILLS_DIR":
+        return get_hermes_home() / "skills"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
@@ -114,7 +141,7 @@ MAX_DESCRIPTION_LENGTH = 1024
 
 def _containing_skills_root(skill_path: Path) -> Path:
     """Return the skills root directory (local or external_dirs entry) that
-    contains ``skill_path``.  Falls back to the local ``SKILLS_DIR`` if no
+    contains ``skill_path``.  Falls back to the local skills dir if no
     match is found (defensive — callers should have located the skill via
     ``_find_skill`` first).
     """
@@ -131,7 +158,7 @@ def _containing_skills_root(skill_path: Path) -> Path:
             return root
         except (ValueError, OSError):
             continue
-    return SKILLS_DIR
+    return _skills_dir()
 
 
 def _pinned_guard(name: str) -> Optional[str]:
@@ -271,8 +298,8 @@ def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[st
 def _resolve_skill_dir(name: str, category: str = None) -> Path:
     """Build the directory path for a new skill, optionally under a category."""
     if category:
-        return SKILLS_DIR / category / name
-    return SKILLS_DIR / name
+        return _skills_dir() / category / name
+    return _skills_dir() / name
 
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
@@ -317,8 +344,9 @@ def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
         return matches
 
     # Collect (profile_name, skills_dir) for every profile EXCEPT the
-    # one whose SKILLS_DIR we already searched in _find_skill().
-    active_dir = SKILLS_DIR.resolve() if SKILLS_DIR.exists() else SKILLS_DIR
+    # one whose skills dir we already searched in _find_skill().
+    _active_skills = _skills_dir()
+    active_dir = _active_skills.resolve() if _active_skills.exists() else _active_skills
     candidates: List[Tuple[str, Path]] = []
 
     # Default profile (~/.hermes/skills) — only consider when active is non-default.
@@ -518,7 +546,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
-        "path": str(skill_dir.relative_to(SKILLS_DIR)),
+        "path": str(skill_dir.relative_to(_skills_dir())),
         "skill_md": str(skill_md),
     }
     if category:
