@@ -50,6 +50,11 @@ _SYSTEM_DIR_PREFIXES = (
     "nix/",
     "packaging/",
     "tests/",
+    # Agent-prompt dirs: a cron/agent prompt IS autonomous behaviour, so it
+    # warrants the strong reviewer (a bad prompt is the cover-wipe class of
+    # risk). The .prompt suffix rule below also catches prompts in any dir.
+    "offsite-geo/",
+    "infographic/",
 )
 # Exact root-level files that are system config.
 _SYSTEM_ROOT_FILES = (
@@ -71,6 +76,11 @@ _SYSTEM_ROOT_FILES = (
 # Root-level filename suffixes / prefixes that are system config.
 _SYSTEM_ROOT_PREFIXES = ("docker-compose", "constraints-")
 _SYSTEM_ROOT_SUFFIXES = (".py",)  # any top-level *.py is module code
+# Suffixes that mark a file system-tier at ANY path depth. A *.prompt file is an
+# autonomous agent's instructions — behaviour, not prose — so it always gets the
+# strong reviewer regardless of which dir it lives in (offsite-geo, infographic,
+# auditor, or a future one). This makes the prior unknown-path fail-safe explicit.
+_SYSTEM_ANY_SUFFIXES = (".prompt",)
 
 # --- content: docs, site, copy, assets --------------------------------------
 _CONTENT_DIR_PREFIXES = (
@@ -89,6 +99,8 @@ def _is_system(path: str) -> bool:
     if not p:
         return False
     if any(p.startswith(prefix) for prefix in _SYSTEM_DIR_PREFIXES):
+        return True
+    if any(p.endswith(suf) for suf in _SYSTEM_ANY_SUFFIXES):
         return True
     # root-level file (no slash) checks
     if "/" not in p:
