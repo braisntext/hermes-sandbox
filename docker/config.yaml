@@ -15,9 +15,11 @@ web:
 image_gen:
   provider: openrouter
   openrouter:
-    model: x-ai/grok-imagine-image-quality
+    model: bytedance-seed/seedream-4.5
 video_gen:
-  provider: huggingface
+  provider: openrouter
+  openrouter:
+    model: alibaba/happyhorse-1.1
 # MCP servers are reconciled per-profile at boot by
 # docker/cont-init.d/03-biglobster-config, not seeded here. The read-only GSC
 # (Google Search Console) server is scoped to the `biglobster` profile only —

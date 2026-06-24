@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODELS: Dict[str, Dict[str, Any]] = {
+    "bytedance-seed/seedream-4.5": {
+        "display": "SeedDream 4.5",
+        "speed": "~10-30s",
+        "strengths": "ByteDance SOTA, photorealism, multilingual prompts",
+        "price": "free (HF Inference API tier)",
+    },
     "black-forest-labs/FLUX.1-schnell": {
         "display": "FLUX.1-schnell",
         "speed": "~5-15s",
@@ -54,7 +60,7 @@ _MODELS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-DEFAULT_MODEL = "black-forest-labs/FLUX.1-schnell"
+DEFAULT_MODEL = "bytedance-seed/seedream-4.5"
 
 # HF Inference API endpoint pattern
 # HF deprecated api-inference.huggingface.co in favour of the inference router.

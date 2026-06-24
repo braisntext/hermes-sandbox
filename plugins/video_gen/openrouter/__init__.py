@@ -1,37 +1,33 @@
-"""OpenRouter image generation backend.
+"""OpenRouter video generation backend.
 
-Uses OpenRouter's chat completions API with ``modalities: ["image"]`` —
+Uses OpenRouter's chat completions API with ``modalities: ["video"]`` —
 same OPENROUTER_API_KEY already used by the Hermes gateway for LLM calls,
 so no extra credentials needed.
 
 Endpoint: ``https://openrouter.ai/api/v1/chat/completions``
-Default model: ``x-ai/grok-imagine-image-quality``
-  - High-quality image generation via xAI Grok through OpenRouter
-  - Response: base64 data URL in choices[0].message.images[0].image_url.url
+Default model: ``alibaba/happyhorse-1.1``
 
 Auth: ``OPENROUTER_API_KEY`` env var (already configured in Zeabur).
 If the key is absent, ``is_available()`` returns False — no crash.
 
 Model selection precedence:
-  1. ``OPENROUTER_IMAGE_MODEL`` env var (escape hatch)
-  2. ``image_gen.openrouter.model`` in config.yaml
-  3. ``image_gen.model`` in config.yaml (when it matches our catalog)
+  1. ``OPENROUTER_VIDEO_MODEL`` env var (escape hatch)
+  2. ``video_gen.openrouter.model`` in config.yaml
+  3. ``video_gen.model`` in config.yaml (when it matches our catalog)
   4. ``DEFAULT_MODEL``
 """
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent.image_gen_provider import (
+from agent.video_gen_provider import (
     DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
+    DEFAULT_RESOLUTION,
+    VideoGenProvider,
     error_response,
-    resolve_aspect_ratio,
-    save_b64_image,
     success_response,
 )
 
@@ -42,39 +38,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODELS: Dict[str, Dict[str, Any]] = {
-    "bytedance-seed/seedream-4.5": {
-        "display": "SeedDream 4.5",
-        "speed": "~10-30s",
-        "strengths": "ByteDance SOTA, photorealism, multilingual prompts",
-        "price": "~$0.07 per image",
-    },
-    "x-ai/grok-imagine-image-quality": {
-        "display": "Grok Imagine (Quality)",
-        "speed": "~5-15s",
-        "strengths": "High-quality generation via xAI Grok on OpenRouter",
-        "price": "~$0.07 per image",
-    },
-    "black-forest-labs/flux.2-klein-4b": {
-        "display": "FLUX.2 Klein 4B",
-        "speed": "~5-10s",
-        "strengths": "Cheap, reliable on OpenRouter, good quality",
-        "price": "~$0.014 per image",
-    },
-    "black-forest-labs/FLUX-schnell": {
-        "display": "FLUX.1-schnell",
-        "speed": "~5-10s",
-        "strengths": "Free tier fallback",
-        "price": "~$0.001-0.003 per image",
-    },
-    "black-forest-labs/FLUX-1.1-pro": {
-        "display": "FLUX 1.1 Pro",
-        "speed": "~10-20s",
-        "strengths": "Higher fidelity, better prompt adherence",
-        "price": "~$0.04 per image",
+    "alibaba/happyhorse-1.1": {
+        "display": "HappyHorse 1.1",
+        "speed": "~30-60s",
+        "strengths": "Alibaba text-to-video via OpenRouter",
+        "price": "~$0.10/video",
+        "modalities": ["text"],
     },
 }
 
-DEFAULT_MODEL = "x-ai/grok-imagine-image-quality"
+DEFAULT_MODEL = "alibaba/happyhorse-1.1"
 
 _OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -89,15 +62,15 @@ def _load_or_config() -> Dict[str, Any]:
         from hermes_cli.config import load_config
 
         cfg = load_config()
-        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        section = cfg.get("video_gen") if isinstance(cfg, dict) else None
         return section if isinstance(section, dict) else {}
     except Exception as exc:
-        logger.debug("Could not load image_gen config: %s", exc)
+        logger.debug("Could not load video_gen config: %s", exc)
         return {}
 
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    env_override = os.environ.get("OPENROUTER_IMAGE_MODEL", "").strip()
+    env_override = os.environ.get("OPENROUTER_VIDEO_MODEL", "").strip()
     if env_override and env_override in _MODELS:
         return env_override, _MODELS[env_override]
 
@@ -115,20 +88,13 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
-def _extract_b64_from_data_url(data_url: str) -> Optional[str]:
-    """Strip the ``data:image/...;base64,`` prefix and return the raw b64 string."""
-    if "," in data_url:
-        return data_url.split(",", 1)[1]
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
 
 
-class OpenRouterImageGenProvider(ImageGenProvider):
-    """OpenRouter image generation via chat completions + modalities: [image]."""
+class OpenRouterVideoGenProvider(VideoGenProvider):
+    """OpenRouter video generation via chat completions + modalities: [video]."""
 
     @property
     def name(self) -> str:
@@ -140,12 +106,12 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
     def is_available(self) -> bool:
         if not os.environ.get("OPENROUTER_API_KEY"):
-            logger.debug("image_gen/openrouter: OPENROUTER_API_KEY not set — provider unavailable")
+            logger.debug("video_gen/openrouter: OPENROUTER_API_KEY not set — provider unavailable")
             return False
         try:
             import requests  # noqa: F401
         except ImportError:
-            logger.debug("image_gen/openrouter: requests package not installed")
+            logger.debug("video_gen/openrouter: requests package not installed")
             return False
         return True
 
@@ -157,6 +123,7 @@ class OpenRouterImageGenProvider(ImageGenProvider):
                 "speed": meta["speed"],
                 "strengths": meta["strengths"],
                 "price": meta["price"],
+                "modalities": meta.get("modalities", ["text"]),
             }
             for model_id, meta in _MODELS.items()
         ]
@@ -168,7 +135,7 @@ class OpenRouterImageGenProvider(ImageGenProvider):
         return {
             "name": "OpenRouter",
             "badge": "paid",
-            "tag": "Grok Imagine (quality) via openrouter.ai — uses existing OPENROUTER_API_KEY",
+            "tag": "HappyHorse 1.1 via openrouter.ai — uses existing OPENROUTER_API_KEY",
             "env_vars": [
                 {
                     "key": "OPENROUTER_API_KEY",
@@ -181,28 +148,34 @@ class OpenRouterImageGenProvider(ImageGenProvider):
     def generate(
         self,
         prompt: str,
+        *,
+        model: Optional[str] = None,
+        image_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None,
+        duration: Optional[int] = None,
         aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+        resolution: str = DEFAULT_RESOLUTION,
+        negative_prompt: Optional[str] = None,
+        audio: Optional[bool] = None,
+        seed: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
-        aspect = resolve_aspect_ratio(aspect_ratio)
 
         if not prompt:
             return error_response(
-                error="Prompt is required and must be a non-empty string",
+                error="Prompt is required for video generation",
                 error_type="invalid_argument",
                 provider="openrouter",
-                aspect_ratio=aspect,
             )
 
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            logger.warning("image_gen/openrouter: OPENROUTER_API_KEY not set")
+            logger.warning("video_gen/openrouter: OPENROUTER_API_KEY not set")
             return error_response(
                 error="OPENROUTER_API_KEY not set.",
                 error_type="auth_required",
                 provider="openrouter",
-                aspect_ratio=aspect,
             )
 
         try:
@@ -212,10 +185,19 @@ class OpenRouterImageGenProvider(ImageGenProvider):
                 error="requests package not installed (pip install requests)",
                 error_type="missing_dependency",
                 provider="openrouter",
-                aspect_ratio=aspect,
             )
 
         model_id, _meta = _resolve_model()
+        if model and model in _MODELS:
+            model_id = model
+
+        modality = "image" if image_url else "text"
+        user_content: Any = prompt
+        if image_url:
+            user_content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -223,49 +205,47 @@ class OpenRouterImageGenProvider(ImageGenProvider):
         }
         payload: Dict[str, Any] = {
             "model": model_id,
-            "modalities": ["image"],
-            "messages": [{"role": "user", "content": prompt}],
+            "modalities": ["video"],
+            "messages": [{"role": "user", "content": user_content}],
         }
 
         try:
-            logger.debug("image_gen/openrouter: POST %s model=%s", _OPENROUTER_CHAT_URL, model_id)
+            logger.debug("video_gen/openrouter: POST %s model=%s", _OPENROUTER_CHAT_URL, model_id)
             response = requests.post(
                 _OPENROUTER_CHAT_URL,
                 headers=headers,
                 json=payload,
-                timeout=60,
+                timeout=120,
             )
         except Exception as exc:
-            logger.warning("image_gen/openrouter: request failed: %s", exc)
+            logger.warning("video_gen/openrouter: request failed: %s", exc)
             return error_response(
                 error=f"OpenRouter API request failed: {exc}",
                 error_type="network_error",
                 provider="openrouter",
                 model=model_id,
                 prompt=prompt,
-                aspect_ratio=aspect,
             )
 
         if response.status_code != 200:
             body = response.text[:500]
-            logger.warning("image_gen/openrouter: HTTP %d — %s", response.status_code, body)
+            logger.warning("video_gen/openrouter: HTTP %d — %s", response.status_code, body)
             return error_response(
                 error=f"OpenRouter API error {response.status_code}: {body}",
                 error_type="api_error",
                 provider="openrouter",
                 model=model_id,
                 prompt=prompt,
-                aspect_ratio=aspect,
             )
 
         try:
             data = response.json()
-            image_url = data["choices"][0]["message"]["images"][0]["image_url"]["url"]
-            if not image_url:
-                raise ValueError("empty image_url")
+            video_url = data["choices"][0]["message"]["videos"][0]["video_url"]["url"]
+            if not video_url:
+                raise ValueError("empty video_url")
         except Exception as exc:
             logger.warning(
-                "image_gen/openrouter: could not parse response: %s — body: %s",
+                "video_gen/openrouter: could not parse response: %s — body: %s",
                 exc, response.text[:300],
             )
             return error_response(
@@ -274,47 +254,15 @@ class OpenRouterImageGenProvider(ImageGenProvider):
                 provider="openrouter",
                 model=model_id,
                 prompt=prompt,
-                aspect_ratio=aspect,
             )
 
-        # Response is a base64 data URL: "data:image/png;base64,<data>"
-        if image_url.startswith("data:"):
-            b64 = _extract_b64_from_data_url(image_url)
-            if not b64:
-                return error_response(
-                    error="Could not extract base64 data from image data URL",
-                    error_type="parse_error",
-                    provider="openrouter",
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                )
-            try:
-                saved_path = save_b64_image(b64, prefix=f"or_{model_id.split('/')[-1]}")
-            except Exception as exc:
-                logger.warning("image_gen/openrouter: could not save image: %s", exc)
-                return error_response(
-                    error=f"Could not save image to cache: {exc}",
-                    error_type="io_error",
-                    provider="openrouter",
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                )
-            return success_response(
-                image=str(saved_path),
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect,
-                provider="openrouter",
-            )
-
-        # Plain URL fallback (future-proof)
         return success_response(
-            image=image_url,
+            video=video_url,
             model=model_id,
             prompt=prompt,
-            aspect_ratio=aspect,
+            modality=modality,
+            aspect_ratio=aspect_ratio,
+            duration=duration or 0,
             provider="openrouter",
         )
 
@@ -325,5 +273,5 @@ class OpenRouterImageGenProvider(ImageGenProvider):
 
 
 def register(ctx) -> None:
-    """Plugin entry point — wire OpenRouterImageGenProvider into the registry."""
-    ctx.register_image_gen_provider(OpenRouterImageGenProvider())
+    """Plugin entry point — wire OpenRouterVideoGenProvider into the registry."""
+    ctx.register_video_gen_provider(OpenRouterVideoGenProvider())
