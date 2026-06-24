@@ -60,6 +60,15 @@ _INVOLUNTARY_AUTOSTART_STATES = frozenset({"stopped", "draining"})
 # is a different process. See the Risk Register in the plan.
 _STALE_RUNTIME_FILES = ("gateway.pid", "processes.json")
 
+# Automation-only profiles that must NEVER run a messaging gateway. They have no
+# Telegram role (e.g. the cron-driven `auditor` GitHub reviewer); if one starts a
+# gateway it seizes the single shared bot token and knocks out the `default`
+# poller, taking every topic down (prod incident 2026-06-24). Their slot is
+# registered but forced DOWN regardless of any persisted state — including an
+# `involuntary_exit` flag that would otherwise auto-restart them across a
+# container recycle. Extend this set when adding further cron/CI-only profiles.
+_GATEWAYLESS_PROFILES = frozenset({"auditor"})
+
 ReconcileActionLabel = Literal["started", "registered", "skipped"]
 
 
@@ -162,7 +171,12 @@ def reconcile_profile_gateways(
                 continue
 
             prior = _read_prior_state(entry)
-            should_start = _should_autostart(prior)
+            if entry.name in _GATEWAYLESS_PROFILES:
+                # Hard down: this profile must never hold the shared bot token,
+                # regardless of prior/involuntary state. See _GATEWAYLESS_PROFILES.
+                should_start = False
+            else:
+                should_start = _should_autostart(prior)
 
             if not dry_run:
                 _cleanup_stale_runtime_files(entry)
