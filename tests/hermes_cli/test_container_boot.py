@@ -164,6 +164,25 @@ def test_involuntary_stopped_autostarts(tmp_path: Path) -> None:
     assert not (scandir / "gateway-coder" / "down").exists()
 
 
+def test_gatewayless_profile_stays_down_even_when_involuntary(tmp_path: Path) -> None:
+    """An automation-only profile (e.g. `auditor`) must NEVER autostart a
+    gateway — even with state=stopped + involuntary_exit=True, which revives a
+    normal profile. It must not seize the shared bot token on a container
+    recycle (prod incident 2026-06-24)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "auditor", state="stopped", involuntary_exit=True)
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    assert _named_actions(actions) == [ReconcileAction(
+        profile="auditor", prior_state="stopped", action="registered",
+    )]
+    # down-marker present => s6 will NOT start it.
+    assert (scandir / "gateway-auditor" / "down").exists()
+
+
 def test_involuntary_draining_autostarts(tmp_path: Path) -> None:
     """If the container died mid-drain (state=draining) after an
     involuntary signal, the slot still comes back up."""
