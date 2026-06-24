@@ -776,6 +776,46 @@ else
     echo "[03-biglobster] Warning: git guard dir $GIT_GUARD_DIR missing — guard NOT installed"
 fi
 
+# --- 6d: auto-resync the auditor's prompt + SOUL from its pulled clone -------
+# The auditor's behaviour lives in two volume-resident places that don't track
+# the repo on their own: the cron job's prompt (jobs.json) and the live profile
+# SOUL.md. Section 6 just pulled the auditor workspace clone to current main; here
+# we propagate that into both, so an auditor change deploys by merge+restart with
+# NO manual `hermes cron edit` / SOUL copy. (A hand-resync against a half-pulled
+# clone caused a silent stale-prompt deploy on 2026-06-24 — this removes the step.)
+# The auditor SOUL + prompt are now REPO-MANAGED: do not hand-edit the volume
+# copies; they are overwritten from the clone every boot. Idempotent, non-fatal.
+auditor_clone="$HERMES_HOME/profiles/auditor/workspace/hermes-sandbox"
+auditor_soul="$HERMES_HOME/profiles/auditor/SOUL.md"
+if [ -f "$auditor_clone/docker/profiles/auditor/SOUL.md" ] && [ -d "$HERMES_HOME/profiles/auditor" ]; then
+    as_hermes cp "$auditor_clone/docker/profiles/auditor/SOUL.md" "$auditor_soul" \
+        && echo "[03-biglobster] Resynced auditor SOUL.md from clone"
+    # Section 5b appended the managed git-auth block to the PRE-pull SOUL; the
+    # fresh copy lacks it, and 5b won't run again this boot — re-append here.
+    if [ -f "$auditor_soul" ] && ! grep -q "Git Auth (managed" "$auditor_soul" 2>/dev/null; then
+        printf '\n## Git Auth (managed — do not edit)\n- Auth is ambient: `git push` uses the stored credential helper and `gh` uses its on-disk config (`~/.config/gh/hosts.yml`). Both are provisioned for you.\n- NEVER write, edit, or recreate `.git-credentials` or `~/.config/gh/hosts.yml`, and NEVER put a token in a remote URL. The token you see is redacted to `***`, so writing it BLANKS the working credential and breaks all pushes.\n- NEVER switch a remote to SSH or generate SSH keys. Remotes stay tokenless `https://github.com/<owner>/<repo>.git`.\n- If a push or `gh` command fails auth, report it to the user verbatim — do not try to fix credentials yourself.\n' \
+            | as_hermes tee -a "$auditor_soul" > /dev/null \
+            && echo "[03-biglobster] Re-appended Git Auth block to auditor SOUL.md"
+    fi
+fi
+# Prompt resync via the validated cron API (atomic save; no raw jobs.json edit).
+# Prompt text comes from the freshly-pulled clone; the cron module is imported
+# from the stable image source ($INSTALL_DIR) since it only does I/O on jobs.json.
+if [ -f "$auditor_clone/auditor/auditor.prompt" ]; then
+    PYTHONPATH="$INSTALL_DIR" HERMES_HOME="$HERMES_HOME" as_hermes "$PY" - "$auditor_clone/auditor/auditor.prompt" <<'PYEOF' || echo "[03-biglobster] Warning: auditor cron-prompt resync failed (non-fatal)"
+import sys
+from pathlib import Path
+prompt = Path(sys.argv[1]).read_text(encoding="utf-8")
+from cron.jobs import list_jobs, update_job
+n = 0
+for job in list_jobs(include_disabled=True):
+    if job.get("profile") == "auditor" and job.get("prompt") != prompt:
+        update_job(job["id"], {"prompt": prompt})
+        n += 1
+print(f"[03-biglobster] Resynced auditor cron prompt into {n} job(s)")
+PYEOF
+fi
+
 # --- 7: egress diagnostics (non-fatal) ---
 echo "[03-biglobster] Egress openrouter.ai: $(curl -sf --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai/ 2>/dev/null || echo FAIL)"
 # Probe the real router endpoint (/v1/models returns 200 without auth); the
