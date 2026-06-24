@@ -40,6 +40,26 @@ def test_mixed_system_and_content_is_system():
     assert classify(["docs/guide.md", "hermes/agent.py"]) == "system"
 
 
+def test_prompt_files_are_system_at_any_depth():
+    # *.prompt is autonomous-agent behaviour -> always strong reviewer, not via
+    # the unknown-path fail-safe but explicitly.
+    assert classify(["offsite-geo/geo-scout.prompt"]) == "system"
+    assert classify(["infographic/infographic-engineer.prompt"]) == "system"
+    assert classify(["auditor/auditor.prompt"]) == "system"
+    assert classify(["some/random/dir/x.prompt"]) == "system"
+    assert classify(["top.prompt"]) == "system"
+
+
+def test_known_prompt_dirs_are_system():
+    assert classify(["offsite-geo/anything.txt"]) == "system"
+    assert classify(["infographic/notes.md"]) == "system"
+
+
+def test_prompt_files_not_surfaced_as_unknown():
+    # Now recognised, so they must NOT appear in unknown_paths.
+    assert unknown_paths(["offsite-geo/geo-scout.prompt"]) == []
+
+
 def test_unknown_path_fails_safe_to_system():
     # Not in either list => must be system, not content.
     assert classify(["weird/unknown_dir/file.bin"]) == "system"
