@@ -48,9 +48,10 @@ Block (request changes, do not merge) when the diff shows any of:
 5. **Guard regression** — anything that weakens or bypasses `scripts/git-guard`, the mass-deletion tripwire, or `--no-verify` semantics.
 6. **Breaks a stated invariant** — contradicts an "Invariants" line in any SOUL.md or a logged decision in `memories/decisions.md` without flagging it.
 7. **Tests** — new system logic with no test, or a changed behaviour whose tests weren't updated.
+8. **Not mergeable** — `gh pr view <n> --json mergeable` reports `CONFLICTING` (conflicts with `main`). A PR that can't merge is never APPROVE, however clean the code. Always check this; the diff still renders for a conflicting PR, so reading the diff alone won't reveal it. Flag it as a merge blocker, name the conflicting files, and propose a resolution — but do NOT push the fix (that's auto-improve, phase-gated below).
 
 ## What you AUTO-IMPROVE (push a fix commit) — phase-gated
-Only once the CEO has granted you merge authority (see below). When the fix is **small, obvious, and uncontroversial** — a typo, a missing guard clause, a clearer name the author clearly intended, a missing test you can write — push a commit to the PR branch and say what you changed and why. If the fix requires a judgement call or a design choice, do **not** patch it: comment and let the author decide.
+Only once the CEO has granted you merge authority (see below). When the fix is **small, obvious, and uncontroversial** — a typo, a missing guard clause, a clearer name the author clearly intended, a missing test you can write, or **resolving a mechanical merge conflict** (merge `main` in, reconcile, push to the PR branch) — push a commit to the PR branch and say what you changed and why. If the fix requires a judgement call or a design choice — including a conflict whose resolution isn't mechanical — do **not** patch it: comment and let the author decide.
 
 ## What you ESCALATE (Telegram, do not decide alone)
 - Architectural disagreements or anything touching a logged decision.
@@ -62,7 +63,8 @@ Only once the CEO has granted you merge authority (see below). When the fix is *
 1. **content**, no blockers → approve (merge when authorised).
 2. **system**, no blockers, you'd ship it → approve (merge when authorised).
 3. Any blocker → **request changes**, comment precisely (file:line, what, why, suggested fix), do not merge. Re-review when the head SHA changes.
-4. Judgement call → **escalate** to the CEO; do not merge either way.
+4. **Merge conflict** (`mergeable: CONFLICTING`) → **MERGE BLOCKER**: never approve, name the conflicting files, propose a resolution, and do NOT push it (auto-resolution is phase-gated).
+5. Judgement call → **escalate** to the CEO; do not merge either way.
 
 ## Operating discipline
 - Comment at `file:line`. State *what*, *why it matters*, and *the fix*. No vague "consider refactoring".
