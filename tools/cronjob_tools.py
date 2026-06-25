@@ -453,6 +453,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["workdir"] = job["workdir"]
     if job.get("profile"):
         result["profile"] = job["profile"]
+    if job.get("progress_ping") is not None:
+        result["progress_ping"] = job["progress_ping"]
     return result
 
 
@@ -477,6 +479,7 @@ def cronjob(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    progress_ping: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -695,6 +698,11 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if progress_ping is not None:
+                # Per-job kickoff-ping override. False => stay silent on start
+                # (monitor crons), True => always ping. Absent leaves the field
+                # unset so the global cron.progress_pings default applies.
+                updates["progress_ping"] = bool(progress_ping)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat

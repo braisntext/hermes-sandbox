@@ -1971,6 +1971,28 @@ class TestKickoffPing:
             _send_kickoff_ping(self._telegram_job())
         send_mock.assert_called_once()
 
+    def test_per_job_false_overrides_global_on(self):
+        """progress_ping=false silences a monitor cron even when the global switch is on."""
+        with patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": True}}):
+            _send_kickoff_ping(self._telegram_job(progress_ping=False))
+        send_mock.assert_not_called()
+
+    def test_per_job_true_overrides_global_off(self):
+        """progress_ping=true forces the ping even when the global switch is off."""
+        with patch("gateway.config.load_gateway_config", return_value=self._mock_gateway_cfg()), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": False}}):
+            _send_kickoff_ping(self._telegram_job(progress_ping=True))
+        send_mock.assert_called_once()
+
+    def test_per_job_unset_falls_back_to_global(self):
+        """No per-job key => the global default decides (here: off)."""
+        with patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"progress_pings": False}}):
+            _send_kickoff_ping(self._telegram_job())  # no progress_ping key
+        send_mock.assert_not_called()
+
     def test_kickoff_failure_is_non_fatal(self):
         """A send failure inside the ping must be swallowed, not raised."""
         with patch("cron.scheduler._send_to_targets", side_effect=RuntimeError("boom")), \

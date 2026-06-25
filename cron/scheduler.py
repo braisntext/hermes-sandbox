@@ -786,12 +786,20 @@ def _send_kickoff_ping(job: dict, adapters=None, loop=None) -> None:
     silent for ``local``/empty deliver jobs.
     """
     try:
-        try:
-            enabled = load_config().get("cron", {}).get("progress_pings", True)
-        except Exception:
-            enabled = True
-        if not enabled:
+        # Per-job override takes precedence over the global default: a monitor
+        # cron (auditor, incident-watcher) sets progress_ping=false to stay
+        # silent on start even while the global switch is on. Absent => fall
+        # back to the global cron.progress_pings config (default true).
+        per_job = job.get("progress_ping")
+        if per_job is False:
             return
+        if per_job is None:
+            try:
+                enabled = load_config().get("cron", {}).get("progress_pings", True)
+            except Exception:
+                enabled = True
+            if not enabled:
+                return
 
         # Only ping when the job actually delivers somewhere (mirror _deliver_result).
         targets = _resolve_delivery_targets(job)

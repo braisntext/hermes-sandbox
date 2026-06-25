@@ -285,6 +285,7 @@ def cron_edit(args):
         workdir=getattr(args, "workdir", None),
         profile=getattr(args, "profile", None),
         no_agent=getattr(args, "no_agent", None),
+        progress_ping=getattr(args, "progress_ping", None),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -302,6 +303,8 @@ def cron_edit(args):
         print(f"  Script: {updated['script']}")
     if updated.get("no_agent"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    if updated.get("progress_ping") is False:
+        print("  Kickoff ping: off (silent on start)")
     if updated.get("workdir"):
         print(f"  Workdir: {updated['workdir']}")
     if updated.get("profile"):

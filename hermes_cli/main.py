@@ -12666,6 +12666,22 @@ def main():
         "--profile",
         help="Hermes profile name to run the job under. Use 'default' for the root profile. Pass empty string to clear.",
     )
+    cron_edit_ping = cron_edit.add_mutually_exclusive_group()
+    cron_edit_ping.add_argument(
+        "--no-progress-ping",
+        dest="progress_ping",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Silence this job's '🔄 Started' kickoff ping (for monitor crons that must stay quiet on start).",
+    )
+    cron_edit_ping.add_argument(
+        "--progress-ping",
+        dest="progress_ping",
+        action="store_const",
+        const=True,
+        help="Force this job's kickoff ping on, regardless of the global cron.progress_pings default.",
+    )
 
     # lifecycle actions
     cron_pause = cron_subparsers.add_parser("pause", help="Pause a scheduled job")
