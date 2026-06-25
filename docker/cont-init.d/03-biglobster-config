@@ -508,6 +508,15 @@ if [ -n "$GITHUB_TOKEN" ]; then
     chown hermes:hermes "$HERMES_HOME/.git-credentials" 2>/dev/null || true
     echo "[03-biglobster] git HTTPS credential configured (x-access-token)"
 
+    # Resolve the shared token's GitHub login once, for the gh hosts.yml `user:`
+    # field written per profile below. The value is cosmetic — gh authenticates
+    # via oauth_token, so a stale/blank user still authenticates (the hand-placed
+    # finview hosts.yml proved this, 2026-06-25) — but a correct login keeps
+    # `gh pr` display + multi-account checks happy. Falls back to the deployment
+    # owner if the API is unreachable at boot.
+    gh_login=$(HOME="$HERMES_HOME" GH_TOKEN="$GITHUB_TOKEN" gh api user --jq .login 2>/dev/null || true)
+    [ -n "$gh_login" ] || gh_login="braisntext"
+
     # Per-profile subprocess homes — run as hermes (profile homes are
     # hermes-owned). Idempotent + non-fatal, matching the script's contract.
     # We CREATE the home/ dir for every real profile (SOUL.md present) rather
@@ -530,6 +539,23 @@ if [ -n "$GITHUB_TOKEN" ]; then
             chmod 600 "$prof_home/.git-credentials"
             chown hermes:hermes "$prof_home/.git-credentials" 2>/dev/null || true
             echo "[03-biglobster] git HTTPS credential configured for profile: $prof_name"
+
+            # gh CLI auth: on-disk hosts.yml so `gh pr ...` authenticates in the
+            # cron lane, which exports NO GH_TOKEN into the terminal subprocess
+            # (only git's on-disk .git-credentials is honoured there). Without
+            # this, profile crons can git push but every `gh pr create` 401s —
+            # the FinView Content Gap Hunter failure (2026-06-25), the same gap
+            # PR #73 closed for the auditor. Skip the auditor profile: §4b pins
+            # its gh auth to the dedicated hermes-auditor bot token, and the
+            # shared agent token must never reach the auditor identity.
+            if [ "$prof_name" != "auditor" ]; then
+                as_hermes mkdir -p "$prof_home/.config/gh"
+                printf 'github.com:\n    oauth_token: %s\n    git_protocol: https\n    user: %s\n' \
+                    "$GITHUB_TOKEN" "$gh_login" > "$prof_home/.config/gh/hosts.yml"
+                chmod 600 "$prof_home/.config/gh/hosts.yml"
+                chown -R hermes:hermes "$prof_home/.config" 2>/dev/null || true
+                echo "[03-biglobster] gh hosts.yml provisioned for profile: $prof_name"
+            fi
         done
     fi
 else
