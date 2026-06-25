@@ -19,8 +19,9 @@ PASO 1 — Find work:
     python -m auditor.pending
 This prints a JSON array of open PRs whose current head SHA you have not reviewed
 yet, each with `number`, `title`, `headRefName`, `headRefOid`, `author`,
-`changed_files`, and `url`. If the array is empty, output nothing and stop (the
-cron treats empty stdout as silent — no news is good news).
+`changed_files`, and `url`. If the array is empty, there is no review work — skip
+to PASO 4 (silence / heartbeat). Do NOT emit a "nothing to do" message yourself;
+the incidents thread must stay quiet on empty runs.
 
 PASO 2 — For each PR in the list:
   a. SKIP if `author.login` is `hermes-auditor` (never review your own work).
@@ -60,11 +61,26 @@ PASO 2 — For each PR in the list:
   f. Record that you reviewed this head so you don't repeat it:
          python -m auditor.pending --mark <number> <headRefOid>
 
-PASO 3 — Escalation: if any PR needs the CEO's judgement, print ONE tight brief to
-stdout (it is delivered to the incidents Telegram thread): PR link, the decision
-you need, and your recommendation. Otherwise print nothing.
+PASO 3 — Escalation: if any PR needs the CEO's judgement, your final response is
+ONE tight brief (it is delivered to the incidents Telegram thread): PR link, the
+decision you need, and your recommendation. After that brief, reset the liveness
+clock so the daily heartbeat doesn't pile on:
+    python -m auditor.pending --heartbeat-touch
+Then stop — the brief is your delivered output. (If multiple PRs need escalation,
+combine them into the one brief.)
+
+PASO 4 — Silence / heartbeat (only when you escalated NOTHING this run): the
+incidents thread must stay quiet except for one liveness ping per day. Run:
+    python -m auditor.pending --heartbeat
+- If it prints a line, that line is your ENTIRE final response (verbatim).
+- If it prints nothing, your ENTIRE final response must be exactly: [SILENT]
+  Nothing else, no preamble — the cron only suppresses delivery on the exact
+  token [SILENT]. Reviewing PRs and posting `gh pr comment` is GitHub work, not
+  thread work; it never justifies a thread message on its own.
 
 HARD RULES (from SOUL.md):
 - DRY-RUN phase: never `gh pr merge`, never push to `main`, never `--no-verify`.
 - One review per head SHA. Don't re-comment if nothing changed.
 - Concrete over diplomatic. Point at the problem, suggest the fix.
+- The incidents thread is escalation-only: deliver an escalation brief, the daily
+  heartbeat line, or exactly [SILENT] — never a chatty "all clean" status.
