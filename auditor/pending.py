@@ -24,12 +24,18 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
 _SEEN_CAP = 2000
 # Fields pulled per PR. ``files`` lets the agent tier without a second call.
 _PR_FIELDS = "number,title,headRefName,headRefOid,author,isDraft,files,url"
+
+# Liveness: the auditor's Telegram channel (incidents thread) carries only
+# escalations. To prove the gate is still running on quiet days, it emits one
+# heartbeat per this window — mirrors the incident watcher (incidents/sweep.py).
+HEARTBEAT_HOURS = 24
 
 
 def _state_path() -> Path:
@@ -106,6 +112,51 @@ def mark_reviewed(number: int, head_sha: str, state_path: Path) -> None:
     _save_state(state_path, state)
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    try:
+        ts = datetime.fromisoformat(value) if value else None
+    except (ValueError, TypeError):
+        return None
+    if ts is None:
+        return None
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
+def _heartbeat_line(now: datetime) -> str:
+    return (
+        f"✅ Hermes auditor: still running, no PRs needed escalation in the last "
+        f"{HEARTBEAT_HOURS}h (as of {now.strftime('%Y-%m-%d %H:%M UTC')})."
+    )
+
+
+def heartbeat(state_path: Path, *, now: Optional[datetime] = None,
+              touch_only: bool = False) -> str:
+    """Emit-and-record a liveness heartbeat iff one is due (>= HEARTBEAT_HOURS).
+
+    Returns the heartbeat line when due (and records the clock), else "".
+    ``touch_only`` resets the clock without emitting — call it after delivering
+    an escalation so its delivery already proves liveness (mirrors the watcher,
+    where any output resets the heartbeat clock).
+    """
+    now = now or _now()
+    state = _load_state(state_path)
+    last = _parse_iso(state.get("last_heartbeat_at"))
+    due = last is None or (now - last) >= timedelta(hours=HEARTBEAT_HOURS)
+    if touch_only:
+        state["last_heartbeat_at"] = now.isoformat()
+        _save_state(state_path, state)
+        return ""
+    if not due:
+        return ""
+    state["last_heartbeat_at"] = now.isoformat()
+    _save_state(state_path, state)
+    return _heartbeat_line(now)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="List PRs the auditor must review.")
     ap.add_argument("--repo", help="owner/name (default: gh infers from cwd)")
@@ -114,6 +165,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--mark", nargs=2, metavar=("NUMBER", "SHA"),
         help="record a PR head as reviewed instead of listing",
     )
+    ap.add_argument(
+        "--heartbeat", action="store_true",
+        help="print the 24h liveness line iff one is due (else nothing), and record it",
+    )
+    ap.add_argument(
+        "--heartbeat-touch", action="store_true",
+        help="reset the heartbeat clock without printing (call after delivering an escalation)",
+    )
     args = ap.parse_args(argv)
     state_path = _state_path()
 
@@ -121,6 +180,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         number, sha = args.mark
         mark_reviewed(int(number), sha, state_path)
         print(f"marked PR #{number} @ {sha} reviewed")
+        return 0
+
+    if args.heartbeat or args.heartbeat_touch:
+        line = heartbeat(state_path, touch_only=args.heartbeat_touch)
+        if line:
+            print(line)
         return 0
 
     prs = pending_prs(args.repo, state_path, include_drafts=args.include_drafts)
