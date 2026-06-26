@@ -346,7 +346,19 @@ def _reconcile_config(config_path, label):
                 ig["openrouter"] = ig_or
                 changed = True
         # model.default from HERMES_DEFAULT_MODEL when provided.
-        if default_model:
+        # AUDITOR EXEMPTION: the auditor profile's base model drives a tool-calling
+        # ORCHESTRATOR loop (gh / python -m auditor.*), not prose. The free,
+        # rate-limited owl-alpha default makes weak tool decisions and derails into
+        # long flailing runs (blocked rm/script/auth.json retries) that take ~25min
+        # and starve every other cron (agent runs serialize). Pin the auditor to a
+        # reliable cheap orchestrator instead — tunable from Zeabur via
+        # HERMES_AUDITOR_ORCHESTRATOR_MODEL, mirroring the §1c review-model knobs.
+        # The reviewer models (auditor/llm.py, §1c) are separate and unaffected.
+        eff_model = default_model
+        if label == "auditor":
+            eff_model = os.environ.get(
+                "HERMES_AUDITOR_ORCHESTRATOR_MODEL", "deepseek/deepseek-v4-flash").strip()
+        if eff_model:
             mv = cfg.get("model")
             if isinstance(mv, dict):
                 cur = mv.get("default")
@@ -354,12 +366,12 @@ def _reconcile_config(config_path, label):
                 cur = mv.strip()
             else:
                 cur = None
-            if cur != default_model:
+            if cur != eff_model:
                 if isinstance(mv, dict):
-                    mv["default"] = default_model
+                    mv["default"] = eff_model
                     cfg["model"] = mv
                 else:
-                    cfg["model"] = {"default": default_model, "provider": "openrouter", "base_url": ""}
+                    cfg["model"] = {"default": eff_model, "provider": "openrouter", "base_url": ""}
                 changed = True
         # Enable the Langfuse observability plugin when its keys are present.
         # The recorder is OPT-IN via plugins.enabled — the env keys alone do
