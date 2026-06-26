@@ -313,3 +313,14 @@ class TestBranchConfusionGatedOnly:
         monkeypatch.setattr("cron.jobs.get_job", lambda jid: {"id": jid, "workdir": None})
         ok, detail = registry._realign_shared_clone(_branch_inc(jid="seo"))
         assert ok is False and "workdir" in detail
+
+    def test_direct_promote_is_refused_at_mode_chokepoint(self, tmp_path):
+        # The "never auto" invariant must hold even if the CLI guard is bypassed.
+        with pytest.raises(ValueError):
+            modes.promote("shared-clone-branch-confusion", path=tmp_path / "m.json")
+
+    def test_is_auto_false_even_if_json_hand_edited_to_auto(self, tmp_path):
+        p = tmp_path / "m.json"
+        p.write_text('{"shared-clone-branch-confusion": "auto"}', encoding="utf-8")
+        # A hand-edited modes.json cannot make a gated-only class auto-act.
+        assert modes.is_auto("shared-clone-branch-confusion", path=p) is False

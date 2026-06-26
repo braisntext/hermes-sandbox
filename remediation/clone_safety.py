@@ -136,6 +136,13 @@ def realign_clone(clone_dir: str, *, git: GitRunner = _git) -> Tuple[bool, str]:
     (it refuses on conflict rather than clobbering), so it is safe to run before
     the assessment; the only destructive step (reset) runs solely after the net
     passes.
+
+    KNOWN LIMITATION — there is a small TOCTOU window between ``assess_reset`` and
+    the ``reset --hard``: in a *shared* clone a second agent could write new work
+    in that gap, which the reset would then discard. This is acceptable ONLY
+    because the class is gated-only (``auto_eligible=False``): a human runs it
+    deliberately on a clone known to be idle/broken. It MUST NOT be promoted to an
+    unattended auto-act without a clone-level lock closing this window first.
     """
     rc, _, err = git(["fetch", "origin", "main"], clone_dir)
     if rc != 0:
