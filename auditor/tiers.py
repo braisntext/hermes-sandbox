@@ -16,14 +16,20 @@ A weak gate that rubber-stamps unknown paths is worse than an over-eager one.
 The lists are deliberately path-prefix / suffix based (no real globbing) so the
 classification is obvious and cheap to reason about. Tune them in one place here.
 
-SCOPE: these globs are tuned for the ``hermes-sandbox`` engine repo. Profile repos
-(biglobster, FinView, grow-shop-*, SocialAgenda) have different layouts; on those,
-unknown paths fall through to ``system`` (fail-safe, over-reviews). Per-repo tier
-profiles keyed by repo slug are Phase 4 — not yet implemented.
+SCOPE (Phase 4): the original globs below are tuned for the ``hermes-sandbox``
+engine repo and are used when ``classify`` is called with no repo (or with the
+engine slug). Profile repos (biglobster, FinView, grow-shop-*, SocialAgenda) are
+LIVE production — including the biglobster.top revenue site — so they get a
+SEPARATE, deliberately NARROW content allowlist (``_is_content_profile``): prose,
+static assets, and a few verified publish dirs are content; everything else is
+``system``. A misclassification on a profile repo can therefore only over-review,
+never wrong-auto-merge a live site. Add a repo's safe publish dirs to
+``_REPO_EXTRA_CONTENT_DIRS`` only after confirming they hold articles/assets, not
+templates/build/source.
 """
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 # --- system: anything that can change runtime behaviour ---------------------
 # Directory prefixes (matched against the repo-relative POSIX path).
@@ -124,16 +130,79 @@ def _is_content(path: str) -> bool:
     return False
 
 
-def classify(paths: Iterable[str]) -> str:
+# --- profile-repo tiering (Phase 4) -----------------------------------------
+# Profile repos have their own layouts and are live production. Their content
+# rule is a NARROW allowlist — prose, static media, and a few explicitly-safe
+# publish dirs — and EVERYTHING ELSE is system (advisory, no auto-merge). This is
+# intentionally tighter than the hermes ruleset: on a site repo, ``web/`` holds
+# core pages + the build, so only the real publish dirs (not all of ``web/``)
+# count as content.
+_HERMES_REPO = "braisntext/hermes-sandbox"
+
+_PROFILE_CONTENT_DIR_PREFIXES = (
+    "docs/",
+    "assets/",
+    "locales/",
+)
+_PROFILE_CONTENT_SUFFIXES = (
+    ".md", ".mdx", ".rst", ".txt",
+    # static media — safe to publish without a code review
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf",
+)
+# Per-repo extra publish dirs that are safe content, VERIFIED against the repo's
+# layout. biglobster: web/blog/ holds the Spanish SEO article HTML and web/assets/
+# the static media — both safe to auto-publish; the rest of web/ (core pages,
+# build.mjs, main.js) stays system.
+_REPO_EXTRA_CONTENT_DIRS = {
+    "braisntext/biglobster": ("web/blog/", "web/assets/"),
+}
+# Files that define autonomous-agent or operational BEHAVIOUR — never content, at
+# any depth, on any repo. A bad SOUL/prompt is the cover-wipe class of risk, so it
+# always gets the strong reviewer + a human merge.
+_SYSTEM_ANY_BASENAMES = frozenset({
+    "SOUL.md", "CLAUDE.md", "AGENTS.md", "AGENT_TEMPLATE.md",
+    "MISSION.md", "CHARTER.md", "OPS.md", "LIMITS.md", "USER.md", "WORKFLOW.md",
+})
+
+
+def _is_behaviour_file(p: str) -> bool:
+    base = p.rsplit("/", 1)[-1]
+    return base in _SYSTEM_ANY_BASENAMES or p.endswith(".prompt")
+
+
+def _is_content_profile(path: str, repo: str) -> bool:
+    p = path.strip().lstrip("./")
+    if not p:
+        return False
+    if _is_behaviour_file(p):
+        return False
+    if any(p.startswith(pre) for pre in _PROFILE_CONTENT_DIR_PREFIXES):
+        return True
+    if any(p.startswith(pre) for pre in _REPO_EXTRA_CONTENT_DIRS.get(repo, ())):
+        return True
+    if any(p.endswith(suf) for suf in _PROFILE_CONTENT_SUFFIXES):
+        return True
+    return False
+
+
+def classify(paths: Iterable[str], repo: Optional[str] = None) -> str:
     """Return ``"system"`` or ``"content"`` for a set of changed file paths.
 
     Fail-safe: ``system`` wins if any path is system OR unrecognised. ``content``
-    only when every path is recognisably content. An empty changeset is treated
-    as ``content`` (nothing to break).
+    only when EVERY changed file is recognisably content. An empty changeset is
+    treated as ``content`` (nothing to break).
+
+    ``repo`` (``owner/name``) selects the ruleset: the engine repo (or ``None``)
+    uses the hermes globs; any other repo uses the narrow profile allowlist.
     """
     paths = [p for p in (paths or []) if p and p.strip()]
     if not paths:
         return "content"
+    if repo and repo != _HERMES_REPO:
+        # Profile repo: narrow allowlist, fail-safe to system.
+        return "content" if all(_is_content_profile(p, repo) for p in paths) else "system"
+    # hermes-sandbox engine repo (or unspecified): the original ruleset.
     for p in paths:
         if _is_system(p):
             return "system"

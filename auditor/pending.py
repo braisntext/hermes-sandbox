@@ -8,15 +8,22 @@ auditor re-reviews.
 
 Dedup mirrors the incident watcher (``incidents/sweep.py``): a bounded ``seen``
 list of stable ids, persisted to ``$HERMES_HOME/auditor/state.json``. The id is
-``"<number>@<headSha>"`` so review is keyed to the exact reviewed tree.
+``"<repo>#<number>@<headSha>"`` — repo-qualified so the same PR number on two
+different repos can never collide — and keyed to the exact reviewed tree.
+
+Multi-repo (Phase 4): with no ``--repo`` the auditor reviews the union of every
+``docker/profiles/*/repos.txt`` plus the engine repo (see ``review_repos()``).
+Each returned PR carries its ``repo`` slug; every ``gh`` call the agent then makes
+must pass ``--repo`` for that slug. Review is API-only — no local clones of the
+profile repos are needed (or made) for this.
 
 PR data comes from ``gh pr list`` (no GitHub Actions involved — this is plain
 API polling, the only path available on a Free private account).
 
 CLI:
-    python -m auditor.pending                  # JSON array of PRs needing review
-    python -m auditor.pending --repo owner/name
-    python -m auditor.pending --mark 42 <sha>  # record PR #42 @ sha as reviewed
+    python -m auditor.pending                      # PRs needing review, ALL repos
+    python -m auditor.pending --repo owner/name     # one repo only
+    python -m auditor.pending --mark 42 <sha> --repo owner/name   # record reviewed
 """
 from __future__ import annotations
 
@@ -38,10 +45,38 @@ _PR_FIELDS = "number,title,headRefName,headRefOid,author,isDraft,files,url"
 HEARTBEAT_HOURS = 24
 
 
+ENGINE_REPO = "braisntext/hermes-sandbox"
+
+
 def _state_path() -> Path:
     from hermes_constants import get_hermes_home
 
     return get_hermes_home() / "auditor" / "state.json"
+
+
+def _repo_root() -> Path:
+    # auditor/pending.py -> repo root that holds auditor/ and docker/.
+    return Path(__file__).resolve().parents[1]
+
+
+def review_repos() -> List[str]:
+    """The union repo set the auditor reviews: every ``docker/profiles/*/repos.txt``
+    entry plus the engine repo. Read from the auditor's own engine clone, so the
+    review set is itself version-controlled and reviewed. Always includes
+    ``ENGINE_REPO`` even if a repos.txt is missing."""
+    repos = {ENGINE_REPO}
+    profiles = _repo_root() / "docker" / "profiles"
+    if profiles.is_dir():
+        for f in sorted(profiles.glob("*/repos.txt")):
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.split("#", 1)[0].strip()
+                if line and "/" in line:
+                    repos.add(line)
+    return sorted(repos)
 
 
 def _load_state(path: Path) -> dict:
@@ -56,8 +91,9 @@ def _save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def _pr_id(number: int, head_sha: str) -> str:
-    return f"{number}@{head_sha}"
+def _pr_id(repo: str, number: int, head_sha: str) -> str:
+    # Repo-qualified: biglobster#5 and FinView#5 must never collide.
+    return f"{repo}#{number}@{head_sha}"
 
 
 def _gh_list_open_prs(repo: Optional[str]) -> List[dict]:
@@ -81,31 +117,36 @@ def _gh_list_open_prs(repo: Optional[str]) -> List[dict]:
 def pending_prs(repo: Optional[str], state_path: Path, include_drafts: bool = False) -> List[dict]:
     """Open PRs whose current head SHA has not been reviewed yet.
 
-    Each item is the ``gh`` PR object plus a flat ``changed_files`` list (paths)
-    for convenient tiering by the caller.
+    With ``repo`` set, only that repo is polled; with ``repo`` ``None`` the whole
+    ``review_repos()`` union is polled. Each item is the ``gh`` PR object plus its
+    ``repo`` slug and a flat ``changed_files`` list (paths) for convenient tiering
+    by the caller.
     """
     state = _load_state(state_path)
     seen = set(state.get("seen", []))
+    repos = [repo] if repo else review_repos()
     result = []
-    for pr in _gh_list_open_prs(repo):
-        if pr.get("isDraft") and not include_drafts:
-            continue
-        number = pr.get("number")
-        head = pr.get("headRefOid") or ""
-        if number is None or not head:
-            continue
-        if _pr_id(number, head) in seen:
-            continue
-        pr["changed_files"] = [f.get("path") for f in (pr.get("files") or []) if f.get("path")]
-        result.append(pr)
+    for r in repos:
+        for pr in _gh_list_open_prs(r):
+            if pr.get("isDraft") and not include_drafts:
+                continue
+            number = pr.get("number")
+            head = pr.get("headRefOid") or ""
+            if number is None or not head:
+                continue
+            if _pr_id(r, number, head) in seen:
+                continue
+            pr["repo"] = r
+            pr["changed_files"] = [f.get("path") for f in (pr.get("files") or []) if f.get("path")]
+            result.append(pr)
     return result
 
 
-def mark_reviewed(number: int, head_sha: str, state_path: Path) -> None:
-    """Record PR ``number`` at ``head_sha`` as reviewed (bounded ``seen`` list)."""
+def mark_reviewed(repo: str, number: int, head_sha: str, state_path: Path) -> None:
+    """Record PR ``repo#number`` at ``head_sha`` as reviewed (bounded ``seen`` list)."""
     state = _load_state(state_path)
     seen_list: list = list(state.get("seen", []))
-    pid = _pr_id(number, head_sha)
+    pid = _pr_id(repo, number, head_sha)
     if pid not in seen_list:
         seen_list.append(pid)
     state["seen"] = seen_list[-_SEEN_CAP:]
@@ -178,8 +219,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.mark:
         number, sha = args.mark
-        mark_reviewed(int(number), sha, state_path)
-        print(f"marked PR #{number} @ {sha} reviewed")
+        repo = args.repo or ENGINE_REPO
+        mark_reviewed(repo, int(number), sha, state_path)
+        print(f"marked {repo}#{number} @ {sha} reviewed")
         return 0
 
     if args.heartbeat or args.heartbeat_touch:

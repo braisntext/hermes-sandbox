@@ -52,13 +52,13 @@ def test_touch_resets_clock_without_emitting(tmp_path):
 
 def test_heartbeat_state_coexists_with_seen(tmp_path):
     sp = tmp_path / "state.json"
-    pending.mark_reviewed(7, "abc", sp)
+    pending.mark_reviewed("o/r", 7, "abc", sp)
     pending.heartbeat(sp, now=pending._now())
     state = json.loads(sp.read_text())
     # neither writer clobbers the other's key
-    assert state["seen"] == ["7@abc"]
+    assert state["seen"] == ["o/r#7@abc"]
     assert "last_heartbeat_at" in state
     # and a later mark preserves the heartbeat clock
     hb = state["last_heartbeat_at"]
-    pending.mark_reviewed(8, "def", sp)
+    pending.mark_reviewed("o/r", 8, "def", sp)
     assert json.loads(sp.read_text())["last_heartbeat_at"] == hb
