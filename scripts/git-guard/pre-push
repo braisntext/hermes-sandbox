@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#
+# Hermes managed pre-push — blocks AGENT identities from pushing directly to main.
+#
+# Lives in the Hermes image at /opt/hermes/scripts/git-guard and is wired into
+# every agent clone by docker/cont-init.d/03-biglobster-config (§6c), which sets
+#   git config core.hooksPath /opt/hermes/scripts/git-guard
+# in each workspace clone and isolated checkout on every boot. git auto-discovers
+# this `pre-push` once hooksPath points here — no extra wiring beyond shipping the
+# file + making it executable.
+#
+# Why: the auditor gate (PHASE 3) only works if changes cannot SIDESTEP it. The
+# gate is "branch + PR, reviewed by the auditor, merged server-side". A direct
+# `git push origin main` from an agent clone would bypass it entirely (the 2026-06
+# cover-wipe reached main exactly that way). This hook makes a direct push to
+# `main` uncommittable for the agent git identities, so every change must travel
+# through a branch + PR.
+#
+# Allowed vs blocked (this hook only ever runs inside agent clones via hooksPath):
+#   BLOCK  agent identity (hermes@agent.local / hermes-auditor) → refs/heads/main
+#   ALLOW  agent identity → any other branch (review/*, feature, a PR branch)
+#   ALLOW  the auditor's `gh pr merge` (server-side; a local hook never fires)
+#   ALLOW  a human identity in this clone (e.g. Brais over SSH) — not an agent
+#   ALLOW  the human Claude Code lane — its clones don't set hooksPath here AND
+#          its identity isn't an agent one, so it is doubly unaffected
+#
+# Emergency override (mirrors HERMES_ALLOW_MASS_DELETION): set
+#   HERMES_ALLOW_PUSH_TO_MAIN=1 git push ...
+# A blocked push appends a signal to $HERMES_HOME/incidents/blocked-commits.jsonl,
+# which the hourly incident watcher reports to the incidents Telegram thread (1904).
+#
+# Account is GitHub Free + private => no Actions, no branch protection, no
+# server-side hooks. This client-side hook is the WHOLE enforcement path.
+set -euo pipefail
+
+guard_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+self="$guard_dir/$(basename "${BASH_SOURCE[0]}")"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# git passes the pushed refs on stdin; capture them once so we can both inspect
+# the refs and forward them to a chained repo hook.
+refs="$(cat 2>/dev/null || true)"
+
+alert() {  # $1 = reason
+  local home dir ts repo
+  home="${HERMES_HOME:-/opt/data}"
+  dir="$home/incidents"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+  repo="$(git config --get remote.origin.url 2>/dev/null || echo "$repo_root")"
+  printf '{"ts":"%s","repo":"%s","cwd":"%s","reason":"%s"}\n' \
+    "$ts" "$repo" "$repo_root" "$1" >> "$dir/blocked-commits.jsonl" 2>/dev/null || true
+}
+
+# Only the agent identities are gated. A human operating in this clone keeps their
+# own git email and is never blocked — their lane is PRs on GitHub, unaffected.
+pusher_email="$(git config user.email 2>/dev/null || echo '')"
+pusher_name="$(git config user.name 2>/dev/null || echo '')"
+is_agent=0
+case "$pusher_email" in
+  *@agent.local|*hermes-auditor*) is_agent=1 ;;
+esac
+case "$pusher_name" in
+  "Hermes Agent"|hermes-auditor) is_agent=1 ;;
+esac
+
+# --- main-protection: agent identities may not push directly to main ---
+if [ "$is_agent" = "1" ] && [ "${HERMES_ALLOW_PUSH_TO_MAIN:-0}" != "1" ]; then
+  # stdin lines: <local ref> <local sha> <remote ref> <remote sha>
+  while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    [ -n "${remote_ref:-}" ] || continue
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+      echo "git-guard: direct push to 'main' is blocked for agent identity '${pusher_email:-?}'." >&2
+      echo "           Changes must land via a branch + pull request — the auditor gate." >&2
+      echo "           The auditor merges approved PRs server-side with 'gh pr merge'." >&2
+      echo "           Emergency override only: HERMES_ALLOW_PUSH_TO_MAIN=1 git push ..." >&2
+      alert "pre-push blocked a direct push to main"
+      exit 1
+    fi
+  done <<EOF
+$refs
+EOF
+fi
+
+# --- per-project chain: repo's own committed pre-push, if any ---
+# core.hooksPath points here instead of at <repo>/.githooks, so a repo that ships
+# its own pre-push would stop firing unless we invoke it explicitly. Forward the
+# remote args and the captured ref list on stdin.
+repo_hook="$repo_root/.githooks/pre-push"
+if [ -f "$repo_hook" ] && [ "$(cd "$(dirname "$repo_hook")" && pwd)/$(basename "$repo_hook")" != "$self" ]; then
+  if ! printf '%s\n' "$refs" | bash "$repo_hook" "$@"; then
+    alert "project pre-push check blocked a push"
+    exit 1
+  fi
+fi
+
+exit 0

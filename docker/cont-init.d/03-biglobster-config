@@ -779,9 +779,12 @@ done
 # (config-free, override HERMES_ALLOW_MASS_DELETION=1) and (2) chains to the
 # repo's own .githooks/pre-commit for per-project broken-ref checks (biglobster's
 # validate-assets.sh); the managed post-commit chains to the repo's post-commit
-# (biglobster doc-sync). A blocked commit appends a signal to
-# incidents/blocked-commits.jsonl, which the hourly incident watcher reports to
-# the incidents Telegram thread.
+# (biglobster doc-sync). The managed pre-push blocks the agent git identities from
+# pushing directly to `main` (override HERMES_ALLOW_PUSH_TO_MAIN=1), forcing every
+# change through a branch + PR so the auditor gate can't be sidestepped; it chains
+# to the repo's own .githooks/pre-push too. A blocked commit or push appends a
+# signal to incidents/blocked-commits.jsonl, which the hourly incident watcher
+# reports to the incidents Telegram thread.
 #
 # Single source of truth: $INSTALL_DIR/scripts/git-guard ships in the image and
 # updates with every deploy — nothing is committed into the project repos, no
@@ -794,7 +797,7 @@ done
 GIT_GUARD_DIR="$INSTALL_DIR/scripts/git-guard"
 if [ -d "$GIT_GUARD_DIR" ]; then
     chmod +x "$GIT_GUARD_DIR"/pre-commit "$GIT_GUARD_DIR"/post-commit \
-        "$GIT_GUARD_DIR"/check-mass-deletion.sh 2>/dev/null || true
+        "$GIT_GUARD_DIR"/pre-push "$GIT_GUARD_DIR"/check-mass-deletion.sh 2>/dev/null || true
     install_guard() {  # $1 = path to a git working tree
         [ -d "$1/.git" ] || return 0
         if HOME="$HERMES_HOME" as_hermes git -C "$1" config core.hooksPath "$GIT_GUARD_DIR" 2>/dev/null; then
