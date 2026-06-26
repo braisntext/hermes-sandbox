@@ -53,6 +53,18 @@ def _default_mode(name: str) -> str:
     return MODE_GATED
 
 
+def _auto_eligible(name: str) -> bool:
+    """Whether a class may EVER reach ``auto``. A gated-only class (a destructive
+    fix) is never auto — enforced here at the mode chokepoint so a hand-edited
+    ``modes.json`` or a direct ``promote()`` can't bypass the CLI guard. Unknown
+    classes are treated as eligible (no special-casing)."""
+    from remediation.registry import REGISTRY
+    for rc in REGISTRY:
+        if rc.name == name:
+            return rc.auto_eligible
+    return True
+
+
 def mode_for(name: str, *, path: Optional[Path] = None) -> str:
     """Effective mode for a class: the persisted override if present and valid,
     otherwise the registry default. Unknown/corrupt overrides fail safe to the
@@ -65,6 +77,10 @@ def mode_for(name: str, *, path: Optional[Path] = None) -> str:
 
 
 def is_auto(name: str, *, path: Optional[Path] = None) -> bool:
+    # A gated-only class is never auto, even if modes.json was hand-edited to say
+    # so — this is the decision the auto-act path (Phase 3) gates on.
+    if not _auto_eligible(name):
+        return False
     return mode_for(name, path=path) == MODE_AUTO
 
 
@@ -81,6 +97,8 @@ def demote(name: str, *, path: Optional[Path] = None) -> str:
 def set_mode(name: str, mode: str, *, path: Optional[Path] = None) -> str:
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid mode {mode!r}; expected one of {sorted(_VALID_MODES)}")
+    if mode == MODE_AUTO and not _auto_eligible(name):
+        raise ValueError(f"{name!r} is gated-only (auto_eligible=False) and cannot be set to auto")
     path = path or _modes_path()
     data = _load(path)
     data[name] = mode

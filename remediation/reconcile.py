@@ -145,6 +145,8 @@ def promotion_recommendations(entries: List[ledger.LedgerEntry], *,
     writes: List[ledger.LedgerEntry] = []
     msgs: List[str] = []
     for rc in REGISTRY:
+        if not rc.auto_eligible:
+            continue  # gated-only class — never suggest promotion (destructive fix)
         if modes.is_auto(rc.name, path=modes_path):
             continue  # already promoted
         count = clean_run_count(rc.name, entries)

@@ -100,8 +100,12 @@ def _known_class(name: str) -> bool:
 def cmd_promote(name: str, *, modes_path: Optional[Path] = None,
                 ledger_path: Optional[Path] = None, now: Optional[datetime] = None) -> Tuple[int, str]:
     """CEO-approved promotion: flip a gated class to auto. Records the promotion."""
-    if not _known_class(name):
+    rc = next((c for c in REGISTRY if c.name == name), None)
+    if rc is None:
         return 1, f"Unknown remediation class '{name}'."
+    if not rc.auto_eligible:
+        return 1, (f"'{name}' is gated-only and must NEVER run unattended — its fix is "
+                   f"destructive (auto_eligible=False). Refusing to promote.")
     if modes.is_auto(name, path=modes_path):
         return 0, f"'{name}' is already auto."
     modes.promote(name, path=modes_path)
