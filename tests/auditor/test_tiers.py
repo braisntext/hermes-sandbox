@@ -78,3 +78,64 @@ def test_leading_dot_slash_normalised():
 def test_unknown_paths_surfaced():
     paths = ["hermes/agent.py", "docs/x.md", "weird/thing.bin"]
     assert unknown_paths(paths) == ["weird/thing.bin"]
+
+
+# --- Phase 4: per-repo tiering ----------------------------------------------
+BIG = "braisntext/biglobster"
+FIN = "braisntext/FinView"
+GS = "braisntext/grow-shop-api"
+ENGINE = "braisntext/hermes-sandbox"
+
+
+def test_engine_slug_matches_no_repo():
+    # Passing the engine slug uses the original ruleset (back-compat with None).
+    assert classify(["web/index.html"], ENGINE) == "content"
+    assert classify(["hermes/agent.py"], ENGINE) == "system"
+    assert classify(["docs/x.md"], ENGINE) == "content"
+
+
+def test_profile_verified_publish_dirs_are_content():
+    assert classify(["web/blog/post.html"], BIG) == "content"
+    assert classify(["web/assets/og-default.avif"], BIG) == "content"
+
+
+def test_profile_core_pages_and_build_are_system():
+    # The broad ``web/`` content rule must NOT leak onto profile repos.
+    assert classify(["web/index.html"], BIG) == "system"
+    assert classify(["web/build.mjs"], BIG) == "system"
+    assert classify(["web/main.js"], BIG) == "system"
+    assert classify(["src/index.js"], BIG) == "system"
+
+
+def test_profile_prose_and_static_assets_are_content():
+    assert classify(["docs/guide.md"], BIG) == "content"
+    assert classify(["README.md"], FIN) == "content"
+    assert classify(["assets/logo.svg"], FIN) == "content"
+    assert classify(["CHANGELOG.md"], FIN) == "content"
+
+
+def test_profile_behaviour_files_are_system():
+    for p in ["SOUL.md", "CLAUDE.md", "MISSION.md", "CHARTER.md", "OPS.md"]:
+        assert classify([p], BIG) == "system", p
+    assert classify(["agents/x.prompt"], FIN) == "system"
+
+
+def test_profile_extra_dir_is_repo_scoped():
+    # web/blog/ is biglobster-specific; unknown on FinView -> fail-safe system.
+    assert classify(["web/blog/post.html"], BIG) == "content"
+    assert classify(["web/blog/post.html"], FIN) == "system"
+
+
+def test_profile_mixed_content_and_code_is_system():
+    assert classify(["web/blog/post.html", "web/main.js"], BIG) == "system"
+
+
+def test_profile_code_repo_defaults_to_system():
+    assert classify(["api.js"], GS) == "system"
+    assert classify(["package.json"], GS) == "system"
+    assert classify(["README.md"], GS) == "content"
+
+
+def test_profile_unknown_path_fails_safe():
+    assert classify(["frontend/App.tsx"], FIN) == "system"
+    assert classify(["wsgi.py"], "braisntext/SocialAgenda") == "system"
