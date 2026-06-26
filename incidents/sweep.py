@@ -262,10 +262,24 @@ def _heartbeat_due(last_hb: Optional[str], now: datetime) -> bool:
     return ts is None or (now - ts) >= timedelta(hours=HEARTBEAT_HOURS)
 
 
+def _reconcile_text(jobs: List[dict], *, now: datetime, dry_run: bool,
+                    ledger_path: Optional[Path], modes_path: Optional[Path]) -> str:
+    """Run the remediation reconcile pass (verify prior fixes + recommend
+    promotions). Best-effort: any failure degrades to "" so the watcher's core
+    incident signal is never blocked by the remediation layer."""
+    try:
+        from remediation.reconcile import reconcile
+        return reconcile(jobs, now=now, dry_run=dry_run,
+                         ledger_path=ledger_path, modes_path=modes_path)
+    except Exception:
+        return ""
+
+
 def sweep(*, now: Optional[datetime] = None, jobs: Optional[List[dict]] = None,
           langfuse: Optional[List[Incident]] = None,
           blocked: Optional[List[Incident]] = None, state_path: Optional[Path] = None,
-          dry_run: bool = False) -> str:
+          dry_run: bool = False, ledger_path: Optional[Path] = None,
+          modes_path: Optional[Path] = None) -> str:
     """Run one sweep. Returns the text to deliver ("" = stay silent)."""
     now = now or _now()
     state_path = state_path or _state_path()
@@ -286,12 +300,23 @@ def sweep(*, now: Optional[datetime] = None, jobs: Optional[List[dict]] = None,
     incidents = cron_failure_incidents(jobs, now=now) + list(lf) + list(bc)
     new = [i for i in incidents if i.id not in seen]
 
-    output = ""
+    incident_text = ""
     if new:
-        output = "\n\n".join(_format_brief(i) for i in new)
+        incident_text = "\n\n".join(_format_brief(i) for i in new)
         for i in new:
             seen.add(i.id)
             seen_list.append(i.id)
+
+    # Remediation reconcile: verify prior gated fixes against current job health
+    # and surface promotion recommendations. Escalations/recommendations are
+    # substantive output and reset the heartbeat clock just like incidents.
+    remediation_text = _reconcile_text(
+        jobs, now=now, dry_run=dry_run, ledger_path=ledger_path, modes_path=modes_path)
+
+    substantive = "\n\n".join(t for t in (incident_text, remediation_text) if t)
+    output = ""
+    if substantive:
+        output = substantive
         last_hb = now.isoformat()
     elif _heartbeat_due(last_hb, now):
         output = _heartbeat_line(now)

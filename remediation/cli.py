@@ -20,8 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from remediation import ledger
-from remediation.registry import RemediationClass, classify
+from remediation import ledger, modes
+from remediation.registry import REGISTRY, RemediationClass, classify
 
 
 def _live_incidents(jobs: Optional[List[dict]] = None):
@@ -93,12 +93,43 @@ def cmd_apply(signature: str, *, jobs: Optional[List[dict]] = None,
     return (0 if ok else 1), f"[{rc.name}] fix {status}: {detail}"
 
 
+def _known_class(name: str) -> bool:
+    return any(rc.name == name for rc in REGISTRY)
+
+
+def cmd_promote(name: str, *, modes_path: Optional[Path] = None,
+                ledger_path: Optional[Path] = None, now: Optional[datetime] = None) -> Tuple[int, str]:
+    """CEO-approved promotion: flip a gated class to auto. Records the promotion."""
+    if not _known_class(name):
+        return 1, f"Unknown remediation class '{name}'."
+    if modes.is_auto(name, path=modes_path):
+        return 0, f"'{name}' is already auto."
+    modes.promote(name, path=modes_path)
+    ledger.append(ledger.make_entry(
+        name, f"promote:{name}", name, modes.MODE_AUTO, ledger.EVENT_PROMOTED,
+        outcome=ledger.OUTCOME_SUCCESS, detail="CEO-approved promotion", now=now,
+    ), path=ledger_path)
+    return 0, f"Promoted '{name}' to auto. It will now self-remediate under the guards."
+
+
+def cmd_demote(name: str, *, modes_path: Optional[Path] = None) -> Tuple[int, str]:
+    """Instant brake: force a class back to gated (no ledger needed — it's a safety op)."""
+    if not _known_class(name):
+        return 1, f"Unknown remediation class '{name}'."
+    modes.demote(name, path=modes_path)
+    return 0, f"Demoted '{name}' to gated. It will only act on explicit approval."
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m remediation.cli")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="show pending remediation proposals")
     ap = sub.add_parser("apply", help="approve + run a bounded fix for a signature")
     ap.add_argument("signature", help="the incident signature (id) to remediate")
+    pp = sub.add_parser("promote", help="promote a class gated -> auto (CEO approval)")
+    pp.add_argument("name", help="remediation class name")
+    dp = sub.add_parser("demote", help="force a class back to gated (instant brake)")
+    dp.add_argument("name", help="remediation class name")
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -106,6 +137,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if args.command == "apply":
         code, msg = cmd_apply(args.signature)
+        print(msg)
+        return code
+    if args.command == "promote":
+        code, msg = cmd_promote(args.name)
+        print(msg)
+        return code
+    if args.command == "demote":
+        code, msg = cmd_demote(args.name)
         print(msg)
         return code
     return 2
