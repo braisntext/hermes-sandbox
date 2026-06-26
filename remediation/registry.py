@@ -54,6 +54,38 @@ def _looks_transient(text: str) -> bool:
     return any(m in low for m in _TRANSIENT_MARKERS)
 
 
+# Substrings that mark a cron failure as a shared-clone *branch/identity*
+# confusion — the SEO / Gap-Hunter hazard where agents sharing
+# ``/opt/data/<profile>`` leave the clone on the wrong branch or with no pinned
+# git identity. Deliberately PRECISE: the fix is destructive, so under-matching
+# (escalate) is far safer than firing a ``reset --hard`` on the wrong incident.
+_BRANCH_CONFUSION_MARKERS = (
+    "detached head", "head detached",
+    "wrong branch", "not on main", "not on branch main", "current branch is not main",
+    "diverged",
+    "author identity unknown", "committer identity unknown",
+    "please tell me who you are", "empty ident name",
+    "would be overwritten by checkout", "would be overwritten by merge",
+    "local changes to the following files would be overwritten",
+    "non-fast-forward", "updates were rejected",
+)
+
+# A branch reset cannot fix a deterministic code/auth/config fault — and running
+# a destructive reset on one would be reckless. If any of these is present the
+# branch-confusion class does NOT match (it escalates as a plain incident).
+_CONFUSION_VETO = (
+    "modulenotfound", "no module named", "no models",
+    "401", "403", "unauthorized", "forbidden",
+)
+
+
+def _looks_branch_confusion(text: str) -> bool:
+    low = (text or "").lower()
+    if any(v in low for v in _CONFUSION_VETO):
+        return False
+    return any(m in low for m in _BRANCH_CONFUSION_MARKERS)
+
+
 def _cron_job_id(inc: Incident) -> Optional[str]:
     """Extract the job id the watcher embedded in ``handoff`` ("cron job id <jid>").
     Robust to ids/names containing colons (unlike splitting ``inc.id``)."""
@@ -81,6 +113,25 @@ def _retry_cron(inc: Incident) -> Tuple[bool, str]:
     return True, f"re-scheduled job '{jid}' for next tick"
 
 
+def _realign_shared_clone(inc: Incident) -> Tuple[bool, str]:
+    """Destructive fix (gated-only): realign the job's shared clone to origin/main
+    and re-pin the agent identity. Delegates the actual git work — and, crucially,
+    the pre-fix cover-wipe safety net — to ``remediation.clone_safety``."""
+    jid = _cron_job_id(inc)
+    if not jid:
+        return False, "could not resolve job id from incident"
+    from cron.jobs import get_job
+    job = get_job(jid)
+    if job is None:
+        return False, f"job '{jid}' not found"
+    clone_dir = job.get("workdir")
+    if not clone_dir:
+        return False, (f"job '{jid}' has no workdir — shared-clone path unknown; "
+                       f"refusing to reset blindly (escalate).")
+    from remediation.clone_safety import realign_clone
+    return realign_clone(str(clone_dir))
+
+
 @dataclass(frozen=True)
 class RemediationClass:
     name: str
@@ -90,6 +141,7 @@ class RemediationClass:
     default_mode: str                          # "gated" | "auto"
     reversal: Optional[Callable[[Incident], Tuple[bool, str]]] = None
     rationale: str = ""                        # why Tier-0 (reversible/idempotent)
+    auto_eligible: bool = True                 # may this class EVER be promoted to auto?
 
 
 CRON_TRANSIENT_FAILURE = RemediationClass(
@@ -105,9 +157,36 @@ CRON_TRANSIENT_FAILURE = RemediationClass(
     rationale="bounded idempotent re-run; debounce caps it to one retry per failure occurrence",
 )
 
-# Registry order = match priority (first match wins in `classify`).
+SHARED_CLONE_BRANCH_CONFUSION = RemediationClass(
+    name="shared-clone-branch-confusion",
+    matches=lambda inc: inc.kind == "cron" and _looks_branch_confusion(inc.detail),
+    fix=_realign_shared_clone,
+    proposal=lambda inc: (
+        f"realign shared clone for cron job ({_cron_job_id(inc) or 'unknown'}): "
+        f"checkout main + reset --hard origin/main + re-pin the *@agent.local identity. "
+        f"DESTRUCTIVE — runs the pre-fix cover-wipe safety net first and REFUSES on any "
+        f"uncommitted or unpushed work."
+    ),
+    default_mode="gated",
+    auto_eligible=False,   # gated-only, FOREVER — see rationale
+    reversal=None,
+    rationale=(
+        "The fix runs `git reset --hard origin/main` in a SHARED clone — the exact "
+        "2026-06-22 BigLobster cover-wipe hazard (a blind git op deleted 48 images). "
+        "Admitted to Tier-0 ONLY because remediation.clone_safety refuses unless the "
+        "clone has nothing unique to lose (no uncommitted changes, no unpushed commits, "
+        "no mass deletion), which reduces the reset to a non-destructive realignment. "
+        "Gated-only and NEVER auto-promotable (auto_eligible=False): a human approves "
+        "every execution."
+    ),
+)
+
+# Registry order = match priority (first match wins in `classify`). Keep the
+# non-destructive retry class FIRST: if an error ever carried both a transient and
+# a branch-confusion marker, the harmless retry should win over the reset.
 REGISTRY: List[RemediationClass] = [
     CRON_TRANSIENT_FAILURE,
+    SHARED_CLONE_BRANCH_CONFUSION,
 ]
 
 

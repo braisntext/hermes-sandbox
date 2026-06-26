@@ -83,9 +83,33 @@ contract.
   - `model-fallback` is **documented precedent, NOT a registry entry** (it self-heals
     in the delegate lane before the watcher sees it — no detect→fix to model).
   - CLI is **standalone** (`python -m remediation.cli`), not a `cli.py` subcommand.
-  - `shared-clone-branch-confusion` **DEFERRED to its own slice**: its fix runs
-    `git reset --hard` in a shared clone = the 2026-06-22 cover-wipe hazard; needs the
-    merge-time mass-deletion safety net + careful design before it joins the registry.
+  - `shared-clone-branch-confusion` **DEFERRED to its own slice** (now built — see the
+    branch-confusion slice below): its fix runs `git reset --hard` in a shared clone =
+    the 2026-06-22 cover-wipe hazard; needed a pre-fix mass-deletion safety net first.
+
+### Branch-confusion slice — destructive class + safety net  ✅ DONE, 34 new tests; 106 total green
+- [x] `remediation/registry.py`: `SHARED_CLONE_BRANCH_CONFUSION` (gated,
+      `auto_eligible=False`). Matcher `_looks_branch_confusion` = precise branch/identity
+      markers (detached HEAD, diverged, "would be overwritten by checkout", non-fast-forward,
+      "Author identity unknown", empty ident) MINUS a code/auth-fault veto. Fix
+      `_realign_shared_clone` resolves the clone from the job `workdir` (`get_job`).
+- [x] `remediation/clone_safety.py` (NEW): pre-fix cover-wipe net mirroring
+      `auditor/safety.py` + `check-mass-deletion.sh` (limit 10, `HERMES_MASS_DELETION_LIMIT`).
+      `assess_reset` REFUSES unless the clone has nothing unique to lose (0 uncommitted
+      tracked changes, 0 commits ahead of origin/main, ≤limit deletions; any git error ⇒
+      fail-safe refuse). `realign_clone` = fetch → checkout main → **assess** →
+      `reset --hard origin/main` → re-pin `hermes@agent.local`. The reset runs ONLY after a
+      clean verdict — that precondition is what admits the class to Tier-0.
+- [x] `RemediationClass.auto_eligible` (default True) ENFORCED, not just documented:
+      `cli.cmd_promote` refuses to promote a non-eligible class; `reconcile.promotion_
+      recommendations` skips it. Branch-confusion is gated-only **forever**.
+- [x] Tests (`tests/test_remediation_registry.py`): matcher precision (transient → retry
+      not reset; auth/code fault → veto), every safety-net refusal path (uncommitted,
+      unpushed commits, mass-deletion, not-a-repo, fetch/checkout fail ⇒ reset never runs),
+      gated-only enforcement (CLI refuses promote; recommender never suggests it).
+- DECISION: the destructive class is admitted to Tier-0 ONLY because the safety net's
+  refusal precondition reduces `reset --hard` to a non-destructive realignment. It is
+  NEVER a Phase-3 auto-act (`auto_eligible=False`) — a human approves every execution.
 
 ### Phase 2 — verify + promotion recommender  ✅ DONE, 18 new tests; 72 total green
 - [x] Next-tick verification (`remediation/reconcile.py:verify_pending`): success =

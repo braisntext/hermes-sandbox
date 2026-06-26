@@ -9,8 +9,14 @@ never does; (2) mode state fails safe to the registry default, never silently to
 import pytest
 
 from incidents.sweep import Incident
-from remediation import modes, registry
-from remediation.registry import CRON_TRANSIENT_FAILURE, classify
+from remediation import clone_safety, modes, reconcile, registry
+from remediation.cli import cmd_promote
+from remediation.clone_safety import assess_reset, realign_clone
+from remediation.registry import (
+    CRON_TRANSIENT_FAILURE,
+    SHARED_CLONE_BRANCH_CONFUSION,
+    classify,
+)
 
 
 def _cron_inc(jid="j1", err="Provider returned error (502)"):
@@ -86,3 +92,224 @@ class TestModeState:
 
     def test_unknown_class_defaults_gated(self, tmp_path):
         assert modes.mode_for("does-not-exist", path=tmp_path / "m.json") == "gated"
+
+
+# --- shared-clone-branch-confusion -----------------------------------------
+
+class FakeGit:
+    """Scripted git runner for hermetic clone-safety tests.
+
+    ``script`` is a list of ``(needle, (rc, out, err))`` pairs; the first whose
+    needle is a substring of the joined args wins. Unmatched commands default to
+    success with no output, so a test only specifies the commands it cares about.
+    """
+
+    def __init__(self, script):
+        self.script = script
+        self.calls = []
+
+    def __call__(self, args, cwd):
+        joined = " ".join(args)
+        self.calls.append(joined)
+        for needle, resp in self.script:
+            if needle in joined:
+                return resp
+        return (0, "", "")
+
+    def ran(self, needle):
+        return any(needle in c for c in self.calls)
+
+
+def _clean_clone_script():
+    """A clone that is on/behind origin/main with nothing unique to lose."""
+    return [
+        ("rev-parse --is-inside-work-tree", (0, "true", "")),
+        ("status --porcelain", (0, "", "")),
+        ("rev-list --count origin/main..HEAD", (0, "0", "")),
+        ("diff --diff-filter=D", (0, "", "")),
+    ]
+
+
+def _branch_inc(jid="seo1", err="fatal: Your local changes to the following files "
+                                "would be overwritten by checkout"):
+    return Incident(
+        id=f"cron:{jid}:2026-06-26T10:00:00+00:00",
+        kind="cron",
+        title=f"Cron job '{jid}' failed (agent error)",
+        detail=f"when: 2026-06-26T10:00:00+00:00\nerror: {err}",
+        handoff=f"cron job id {jid}",
+    )
+
+
+class TestBranchConfusionHeuristic:
+    @pytest.mark.parametrize("err", [
+        "fatal: Your local changes to the following files would be overwritten by checkout",
+        "HEAD detached at a1b2c3d",
+        "Author identity unknown\n*** Please tell me who you are.",
+        "Your branch and 'origin/main' have diverged",
+        "error: failed to push some refs (non-fast-forward)",
+        "Updates were rejected because the tip of your current branch is behind",
+        "empty ident name not allowed",
+    ])
+    def test_branch_confusion_matches(self, err):
+        assert classify(_branch_inc(err=err)) is SHARED_CLONE_BRANCH_CONFUSION
+
+    @pytest.mark.parametrize("err", [
+        "Provider returned error (502)", "Read timed out",
+        "rate limit exceeded (429)", "503 Service Unavailable",
+    ])
+    def test_plain_transient_does_not_get_destructive_class(self, err):
+        # Transient errors must route to the harmless retry, never the reset.
+        assert classify(_branch_inc(err=err)) is CRON_TRANSIENT_FAILURE
+
+    @pytest.mark.parametrize("err", [
+        "ModuleNotFoundError despite detached HEAD",
+        "401 Unauthorized while on the wrong branch",
+        "No models provided; branch diverged",
+    ])
+    def test_code_or_auth_fault_vetoes_destructive_class(self, err):
+        # A deterministic fault a reset can't fix must NOT trigger the reset.
+        assert classify(_branch_inc(err=err)) is None
+
+    def test_non_cron_incident_does_not_match(self):
+        inc = Incident(id="trace:x", kind="langfuse", title="t",
+                       detail="detached HEAD", handoff="trace-id x")
+        assert classify(inc) is None
+
+    def test_proposal_flags_destructive_and_names_job(self):
+        text = SHARED_CLONE_BRANCH_CONFUSION.proposal(_branch_inc(jid="be8a4add42b0"))
+        assert "be8a4add42b0" in text and "DESTRUCTIVE" in text
+
+
+class TestCloneSafetyNet:
+    def test_clean_clone_is_safe(self):
+        v = assess_reset("/opt/data/p", git=FakeGit(_clean_clone_script()))
+        assert v.safe is True and v.files_lost == 0
+
+    def test_uncommitted_work_refuses(self):
+        script = _clean_clone_script()[:1] + [
+            ("status --porcelain", (0, " M article.html\n D cover.png", "")),
+            ("rev-list --count origin/main..HEAD", (0, "0", "")),
+            ("diff --diff-filter=D", (0, "", "")),
+        ]
+        v = assess_reset("/opt/data/p", git=FakeGit(script))
+        assert v.safe is False and v.uncommitted == 2 and "uncommitted" in v.reason
+
+    def test_untracked_files_alone_are_not_a_loss(self):
+        # "??" lines survive reset --hard, so they don't block.
+        script = _clean_clone_script()[:1] + [
+            ("status --porcelain", (0, "?? scratch.txt\n?? notes.md", "")),
+            ("rev-list --count origin/main..HEAD", (0, "0", "")),
+            ("diff --diff-filter=D", (0, "", "")),
+        ]
+        v = assess_reset("/opt/data/p", git=FakeGit(script))
+        assert v.safe is True and v.uncommitted == 0
+
+    def test_unpushed_commits_refuse(self):
+        script = _clean_clone_script()[:2] + [
+            ("rev-list --count origin/main..HEAD", (0, "3", "")),
+            ("diff --diff-filter=D", (0, "", "")),
+        ]
+        v = assess_reset("/opt/data/p", git=FakeGit(script))
+        assert v.safe is False and v.ahead == 3 and "ahead" in v.reason
+
+    def test_mass_deletion_refuses_cover_wipe(self):
+        deleted = "\n".join(f"covers/img{i}.png" for i in range(48))
+        script = _clean_clone_script()[:3] + [
+            ("diff --diff-filter=D", (0, deleted, "")),
+        ]
+        v = assess_reset("/opt/data/p", limit=10, git=FakeGit(script))
+        assert v.safe is False and v.files_lost == 48 and "mass-deletion" in v.reason
+
+    def test_deletions_within_limit_are_safe(self):
+        deleted = "\n".join(f"f{i}.txt" for i in range(5))
+        script = _clean_clone_script()[:3] + [
+            ("diff --diff-filter=D", (0, deleted, "")),
+        ]
+        v = assess_reset("/opt/data/p", limit=10, git=FakeGit(script))
+        assert v.safe is True and v.files_lost == 5
+
+    def test_not_a_git_repo_fails_safe(self):
+        v = assess_reset("/tmp/nope", git=FakeGit([
+            ("rev-parse --is-inside-work-tree", (128, "", "not a git repository")),
+        ]))
+        assert v.safe is False and "not a git work tree" in v.reason
+
+    def test_git_status_error_fails_safe(self):
+        script = _clean_clone_script()[:1] + [
+            ("status --porcelain", (1, "", "boom")),
+        ]
+        v = assess_reset("/opt/data/p", git=FakeGit(script))
+        assert v.safe is False
+
+    def test_realign_clean_runs_reset_and_repins(self):
+        git = FakeGit(_clean_clone_script())
+        ok, detail = realign_clone("/opt/data/p", git=git)
+        assert ok is True
+        assert git.ran("fetch origin main")
+        assert git.ran("checkout main")
+        assert git.ran("reset --hard origin/main")
+        assert git.ran("config user.email hermes@agent.local")
+
+    def test_realign_refuses_and_does_not_reset_when_unsafe(self):
+        script = _clean_clone_script()[:1] + [
+            ("status --porcelain", (0, " M cover.png", "")),
+            ("rev-list --count origin/main..HEAD", (0, "0", "")),
+            ("diff --diff-filter=D", (0, "", "")),
+        ]
+        git = FakeGit(script)
+        ok, detail = realign_clone("/opt/data/p", git=git)
+        assert ok is False
+        assert not git.ran("reset --hard")   # the destructive step never ran
+
+    def test_realign_refuses_when_fetch_fails(self):
+        git = FakeGit([("fetch origin main", (1, "", "network down"))])
+        ok, _ = realign_clone("/opt/data/p", git=git)
+        assert ok is False
+        assert not git.ran("reset --hard")
+
+    def test_realign_refuses_when_checkout_fails(self):
+        git = FakeGit([("checkout main", (1, "", "would be overwritten"))])
+        ok, _ = realign_clone("/opt/data/p", git=git)
+        assert ok is False
+        assert not git.ran("reset --hard")
+
+
+class TestBranchConfusionGatedOnly:
+    def test_default_mode_is_gated(self):
+        assert SHARED_CLONE_BRANCH_CONFUSION.default_mode == "gated"
+
+    def test_is_not_auto_eligible(self):
+        assert SHARED_CLONE_BRANCH_CONFUSION.auto_eligible is False
+
+    def test_mode_resolves_gated_by_default(self, tmp_path):
+        assert modes.mode_for("shared-clone-branch-confusion",
+                              path=tmp_path / "m.json") == "gated"
+
+    def test_cli_refuses_to_promote_gated_only_class(self, tmp_path):
+        code, msg = cmd_promote("shared-clone-branch-confusion",
+                                modes_path=tmp_path / "m.json",
+                                ledger_path=tmp_path / "l.jsonl")
+        assert code == 1 and "Refusing to promote" in msg
+        # And the mode was never flipped.
+        assert modes.is_auto("shared-clone-branch-confusion",
+                             path=tmp_path / "m.json") is False
+
+    def test_recommender_never_suggests_gated_only_class(self):
+        # Even with K+ clean gated runs, a non-eligible class is not recommended.
+        sig_base = "cron:seo:2026-06-26T"
+        entries = [
+            reconcile.ledger.make_entry(
+                "shared-clone-branch-confusion", f"{sig_base}{i:02d}:00:00+00:00",
+                "cron job id seo", modes.MODE_GATED, reconcile.ledger.EVENT_VERIFIED,
+                outcome=reconcile.ledger.OUTCOME_SUCCESS)
+            for i in range(reconcile.K_PROMOTION + 2)
+        ]
+        writes, msgs = reconcile.promotion_recommendations(entries)
+        assert all("shared-clone-branch-confusion" not in m for m in msgs)
+        assert writes == []
+
+    def test_realign_fix_refuses_when_job_has_no_workdir(self, monkeypatch):
+        monkeypatch.setattr("cron.jobs.get_job", lambda jid: {"id": jid, "workdir": None})
+        ok, detail = registry._realign_shared_clone(_branch_inc(jid="seo"))
+        assert ok is False and "workdir" in detail
