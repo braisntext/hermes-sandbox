@@ -63,12 +63,29 @@ contract.
 - NOTE: kill-switch read lives in the guard module (pure, testable); wiring it into
   the watcher entrypoint happens in Phase 1 when the watcher first calls the gate.
 
-### Phase 1 — registry + gated proposals (no auto-act yet)  ☐
-- [ ] Registry with the 3 seed classes; `model-fallback`=auto, others=gated.
-- [ ] Mode state on volume + load/persist (reboot-safe, §6d-safe).
-- [ ] Watcher: detect registered class → write pending row + post proposal to 1904.
-- [ ] `hermes remediate list` / `apply <id>` CLI (executes bounded fix, logs outcome).
-- [ ] Tests: matcher precision, proposal format, apply→outcome recording.
+### Phase 1 — registry + gated proposals (no auto-act yet)  ✅ DONE, 39 new tests green
+- [x] Registry (`remediation/registry.py`): `RemediationClass`, transient-vs-hard-fault
+      heuristic, `cron-transient-failure` (gated, fix=`cron.jobs.trigger_job`), `classify()`.
+      Signature = the incident id the watcher already mints (no new scheme).
+- [x] Mode state (`remediation/modes.py`): `modes.json` on volume, `mode_for`/`is_auto`/
+      `promote`/`demote`, fails safe to registry default (never silently auto). §6d-safe.
+- [x] Watcher enrichment (`incidents/sweep.py:_remediation_hint`): classifiable incidents
+      get a "Proposed remediation … apply <id>" line in the brief. Disk-free, lazy import,
+      silence contract preserved. (No ledger write from the watcher — CLI owns that.)
+- [x] Standalone CLI (`python -m remediation.cli list|apply <signature>`): `list` =
+      live incidents that classify, debounce-filtered; `apply` re-validates LIVE
+      (no retry of a recovered job), runs the bounded fix, logs `applied`+outcome.
+- [x] Tests: transient heuristic precision (hard-fault veto), mode fail-safe, brief
+      enrichment, apply→ledger, re-validate-live, debounce-one-per-occurrence.
+- DECISIONS (CEO-approved this session):
+  - Tier-0 admission relaxed to **reversible OR bounded-idempotent** (a retry has no
+    undo but debounce caps it to one per occurrence; `reversal=None` + rationale).
+  - `model-fallback` is **documented precedent, NOT a registry entry** (it self-heals
+    in the delegate lane before the watcher sees it — no detect→fix to model).
+  - CLI is **standalone** (`python -m remediation.cli`), not a `cli.py` subcommand.
+  - `shared-clone-branch-confusion` **DEFERRED to its own slice**: its fix runs
+    `git reset --hard` in a shared clone = the 2026-06-22 cover-wipe hazard; needs the
+    merge-time mass-deletion safety net + careful design before it joins the registry.
 
 ### Phase 2 — verify + promotion recommender  ☐
 - [ ] Next-tick verification: signature cleared ⇒ success; else escalate.

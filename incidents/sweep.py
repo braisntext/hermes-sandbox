@@ -219,11 +219,34 @@ def _prune_blocked(path: Path, cap: int = _BLOCKED_CAP) -> None:
         pass
 
 
+def _remediation_hint(inc: Incident) -> str:
+    """If this incident maps to a known remediation class, append the proposed
+    (gated) fix + the approve command. Pure/disk-free: ``classify`` only reads the
+    incident. Lazy import keeps the watcher independent of the remediation package
+    and avoids any import cycle. Returns "" when there is no known fix.
+
+    Phase 1 is gated-only — every proposal waits for an explicit ``remediate apply``.
+    Phase 3 will branch here on ``modes.is_auto`` to auto-act past the guards.
+    """
+    try:
+        from remediation.registry import classify
+        rc = classify(inc)
+    except Exception:
+        return ""
+    if rc is None:
+        return ""
+    return (
+        f"\n🔧 *Proposed remediation* ({rc.name}): {rc.proposal(inc)}\n"
+        f"_To approve, run: python -m remediation.cli apply {inc.id}_"
+    )
+
+
 def _format_brief(inc: Incident) -> str:
     return (
         f"🔴 *Incident* — {inc.title}\n"
         f"{inc.detail}\n"
         f"_To get a proposed fix, hand this to Claude Code: {inc.handoff}_"
+        f"{_remediation_hint(inc)}"
     )
 
 
