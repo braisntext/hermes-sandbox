@@ -87,11 +87,23 @@ contract.
     `git reset --hard` in a shared clone = the 2026-06-22 cover-wipe hazard; needs the
     merge-time mass-deletion safety net + careful design before it joins the registry.
 
-### Phase 2 — verify + promotion recommender  ☐
-- [ ] Next-tick verification: signature cleared ⇒ success; else escalate.
-- [ ] Clean-run counter per class; ≥K ⇒ promotion recommendation to 1904.
-- [ ] Promotion approval flips mode state gated→auto.
-- [ ] Tests: verify success/fail paths, promotion trigger at K, mode flip persists.
+### Phase 2 — verify + promotion recommender  ✅ DONE, 18 new tests; 72 total green
+- [x] Next-tick verification (`remediation/reconcile.py:verify_pending`): success =
+      **job re-ran since the apply AND is healthy** (not mere signature rotation);
+      still-failing ⇒ `failed` + escalation; not-yet-rerun ⇒ stays pending.
+- [x] Clean-run counter (`clean_run_count`): distinct gated verified-success signatures.
+- [x] Promotion recommender (`promotion_recommendations`): ≥K=5 ⇒ "promote?" to 1904,
+      deduped via a `recommended` ledger event (24h cooldown), skips already-auto.
+- [x] `reconcile()` orchestrates verify→recommend in one pass (a just-verified run can
+      tip the threshold same tick); wired into `sweep.py` (escalations/recs are
+      substantive output + reset heartbeat; clean pass stays silent; dry-run-safe).
+- [x] Promotion approval CLI: `python -m remediation.cli promote|demote <class>` —
+      `promote` flips gated→auto + logs `promoted`; `demote` is the instant brake.
+- [x] Tests: verify success/fail/pending/absent-job, no-re-verify, clean-run count,
+      recommend at-K + dedup + already-auto, reconcile e2e, sweep integration, CLI.
+- DESIGN NOTE: verification keys on JOB HEALTH, not signature rotation — a retried
+  job that immediately re-fails (even for a new reason) does NOT count toward
+  promotion. Conservative: the track record only rewards fixes that restored health.
 
 ### Phase 3 — first auto-act (only after a class is promoted)  ☐
 - [ ] `auto` path executes bounded fix under debounce + rate-limit + kill-switch.

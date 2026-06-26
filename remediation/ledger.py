@@ -30,6 +30,7 @@ EVENT_APPLIED = "applied"     # bounded fix executed (gated-after-approval, or a
 EVENT_VERIFIED = "verified"   # next-tick check: signature cleared (success)
 EVENT_FAILED = "failed"       # next-tick check: signature persists / fix errored
 EVENT_REVERTED = "reverted"   # fix rolled back via its declared reversal
+EVENT_RECOMMENDED = "recommended"  # promotion suggested to CEO (deduped via this event)
 EVENT_PROMOTED = "promoted"   # class mode flipped gated -> auto (CEO approved)
 
 OUTCOME_PENDING = "pending"
