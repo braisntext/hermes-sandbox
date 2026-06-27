@@ -54,3 +54,43 @@ def test_request_is_well_formed(monkeypatch):
     assert body["model"] == "vendor/strong-1"
     assert body["temperature"] == 0
     assert body["messages"][0]["role"] == "user"
+
+
+def _body(req):
+    return json.loads(req.data.decode("utf-8"))
+
+
+def test_session_id_emitted_for_sticky_routing():
+    # session_id is the OpenRouter sticky-routing key that keeps the cache warm.
+    req = llm._build_request("deepseek/deepseek-v4-pro", [{"role": "user", "content": "hi"}],
+                             "sk-test", session_id="hermes-auditor-system")
+    assert _body(req)["session_id"] == "hermes-auditor-system"
+
+
+def test_session_id_truncated_to_256():
+    req = llm._build_request("deepseek/deepseek-v4-pro", [{"role": "user", "content": "hi"}],
+                             "sk-test", session_id="x" * 500)
+    assert len(_body(req)["session_id"]) == 256
+
+
+def test_deepseek_is_provider_pinned_with_fallbacks_on():
+    # DeepSeek cache is backend-local → pin to the deepseek upstream, but keep
+    # fallbacks ON so an outage doesn't break the review gate.
+    req = llm._build_request("deepseek/deepseek-v4-flash", [{"role": "user", "content": "hi"}],
+                             "sk-test", session_id="hermes-auditor-system")
+    prov = _body(req)["provider"]
+    assert prov == {"order": ["deepseek"]}
+    assert "allow_fallbacks" not in prov  # fallbacks stay default-on
+
+
+def test_non_deepseek_is_not_pinned():
+    # owl-alpha is a single OpenRouter-native backend — no pinning, no harm.
+    req = llm._build_request("openrouter/owl-alpha", [{"role": "user", "content": "hi"}],
+                             "sk-test", session_id="hermes-auditor-content")
+    assert "provider" not in _body(req)
+
+
+def test_no_session_id_omits_field():
+    # Backwards-compatible: absent session_id => no key in the body.
+    req = llm._build_request("vendor/strong-1", [{"role": "user", "content": "hi"}], "sk-test")
+    assert "session_id" not in _body(req)

@@ -128,6 +128,17 @@ model:
 #
 #   # Data policy: "allow" (default) or "deny" to exclude providers that may store data
 #   # data_collection: "deny"
+#
+#   # ── DeepSeek prompt-cache pinning (RECOMMENDED for deepseek/* as main model) ──
+#   # DeepSeek's context cache is automatic but backend-local: OpenRouter
+#   # load-balances deepseek/* across upstream backends with separate caches,
+#   # so consecutive turns can land on a cold backend and re-bill the FULL
+#   # prefix. Pinning the order to "deepseek" keeps every turn on the same
+#   # cache-warm backend. Measured impact: ~2x cost difference at scale.
+#   # Fallbacks stay ON by default, so a DeepSeek outage degrades to another
+#   # provider rather than failing. "deepseek" is a no-op for non-deepseek
+#   # models (that backend doesn't serve them), so this is safe to leave set.
+#   # order: ["deepseek"]
 
 # =============================================================================
 # OpenRouter Response Caching (only applies when using OpenRouter)

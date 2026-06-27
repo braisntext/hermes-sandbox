@@ -53,8 +53,29 @@ def resolve_model(tier: str) -> str:
     return os.environ.get("HERMES_AUDITOR_SYSTEM_MODEL", "").strip() or SYSTEM_MODEL_DEFAULT
 
 
-def _build_request(model: str, messages: List[dict], api_key: str) -> urllib.request.Request:
-    body = json.dumps({"model": model, "messages": messages, "temperature": 0}).encode("utf-8")
+def _build_request(
+    model: str,
+    messages: List[dict],
+    api_key: str,
+    *,
+    session_id: Optional[str] = None,
+) -> urllib.request.Request:
+    payload: dict = {"model": model, "messages": messages, "temperature": 0}
+    # OpenRouter sticky-routing key (≤256 chars): pins consecutive auditor
+    # reviews to the same upstream backend so the shared system-prompt/rubric
+    # prefix stays cache-warm across reviews. Best-effort on OpenRouter's side.
+    if session_id:
+        payload["session_id"] = session_id[:256]
+    # DeepSeek's context cache is backend-local. Without pinning, OpenRouter
+    # load-balances deepseek/* across upstream backends with cold caches and
+    # re-bills the full prefix (measured ~44% miss / 56% hit on the orchestrator
+    # before this). Prefer the DeepSeek upstream so the cache is reused; keep
+    # fallbacks ON so a DeepSeek outage degrades to another provider rather than
+    # breaking the review gate. Only deepseek/* benefits — owl-alpha is single
+    # OpenRouter-native backend and needs no pinning.
+    if model.startswith("deepseek/"):
+        payload["provider"] = {"order": ["deepseek"]}
+    body = json.dumps(payload).encode("utf-8")
     return urllib.request.Request(
         _OPENROUTER_URL,
         data=body,
@@ -84,7 +105,9 @@ def review(tier: str, user_content: str, *, system_msg: Optional[str] = None,
         {"role": "system", "content": system_msg or _DEFAULT_SYSTEM_MSG},
         {"role": "user", "content": user_content},
     ]
-    req = _build_request(model, messages, api_key)
+    # Stable per-tier session id → all reviews of a tier stick to one backend,
+    # keeping the shared system-prompt/rubric prefix cache-warm across PRs.
+    req = _build_request(model, messages, api_key, session_id=f"hermes-auditor-{tier}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
