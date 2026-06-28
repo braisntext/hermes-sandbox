@@ -17,7 +17,7 @@ DRY_RUN = false
 Antes del pre-flight, determina el modo de hoy consultando el [LEDGER DE COBERTURA]:
 
 1. Cuenta las URLs con `baseline_complete = false` (backlog sin auditar).
-2. Cuenta las reglas en `[REGISTRO DE REGLAS]` con `propagacion_pendiente = true`.
+2. Cuenta las reglas en `[REGISTRO DE REGLAS]` (`/opt/data/profiles/biglobster/seo/seo-rules.json`, array JSON; si no existe = sin reglas) con `propagacion_pendiente = true`.
 3. Deriva el modo:
 
    - **CATCH-UP** (hay backlog > 0): el sitio aún no tiene una línea base completa.
@@ -185,7 +185,12 @@ Si una URL no dispara ningún trigger, NO entra al batch aunque su score histór
 Cuando surge una buena práctica nueva (ej. un nuevo bot de IA que citar en robots.txt, un formato de schema recién soportado, un patrón de citabilidad GEO), el sitio debe adaptarse de forma controlada, no de golpe ni por iniciativa unilateral del agente.
 Flujo obligatorio:
 1. El agente PUEDE proponer reglas candidatas en la sección "Insights" del reporte, con evidencia. NUNCA aplica una regla nueva a todo el sitio por su cuenta.
-2. Una regla solo se activa cuando un humano la registra en [REGISTRO DE REGLAS]:
+2. Una regla solo se activa cuando un humano la registra en [REGISTRO DE REGLAS].
+   Ruta canónica del registro: `/opt/data/profiles/biglobster/seo/seo-rules.json`,
+   un ARRAY JSON de reglas. Léelo al inicio de cada ciclo (junto al ledger) para
+   determinar el modo; si no existe, trátalo como `[]` (sin reglas). Para LEER/ESCRIBIR
+   este archivo usa read_file / write_file / terminal (cat), NUNCA execute_code ni
+   python3 -c/-e. Estructura de cada regla:
 
 {
   "rule_id": "RULE-2026-00X",
@@ -196,7 +201,7 @@ Flujo obligatorio:
   "propagacion_pendiente": true
 }
 
-3. En modo PROPAGACIÓN, el batch diario se llena con URLs dentro del alcance que aún no tengan el rule_id en su reglas_cumplidas del ledger. Procesa de forma progresiva, respetando todos los límites por ciclo. Al cubrir la última URL, marca propagacion_pendiente = false.
+3. En modo PROPAGACIÓN, el batch diario se llena con URLs dentro del alcance que aún no tengan el rule_id en su `reglas_cumplidas` del ledger. A cada URL aplícale SOLO la `accion_asociada` de la regla más las acciones técnicas seguras (NO una reauditoría completa), para acotar el blast radius; tras el push, añade el rule_id a `reglas_cumplidas` de esa URL en el ledger. Procesa de forma progresiva, respetando todos los límites por ciclo (`BATCH_SIZE`). Al cubrir la última URL del alcance, marca `propagacion_pendiente = false` en `seo-rules.json`.
 4. Toda URL nueva creada tras el alta de una regla debe cumplirla desde su primera auditoría.
 Esto mantiene el blast radius acotado: las reglas entran con aprobación humana y se propagan de forma gradual y trazable, no en un cambio masivo.
 
@@ -221,7 +226,7 @@ Tu arquitectura de herramientas disponibles:
 
 **[PRE-FLIGHT: PRIORIZACIÓN DE URLS]**
 
-`BATCH_SIZE = 1`   # nº máx. de URLs por ciclo (arranque seguro; subir cuando el flujo esté estable)
+`BATCH_SIZE = 3`   # nº máx. de URLs por ciclo (3 para la ventana de propagación OG; bajar a 1 en estado estacionario si se prefiere)
 
 PASO 0 — Árbol limpio (OBLIGATORIO):
 Trabajas en tu checkout AISLADO (es tu workdir). La identidad ya está fijada a

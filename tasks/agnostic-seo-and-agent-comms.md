@@ -107,6 +107,12 @@ Every artifact takes a `profile` param from day one (profile-first, not retrofit
    (OG/Twitter meta, full auto-inject from page content) + Acción 11 (CWV, mostly
    advisory — auto only lazy-load below-fold imgs + eager/fetchpriority hero; alert
    for JS/CSS load-order). Splice doc: `seo-og-cwv-prompt-patch.md`.
+2b. **Backfill enablement (this branch):** gave `[REGISTRO DE REGLAS]` a canonical
+   path (`/opt/data/profiles/<profile>/seo/seo-rules.json`) — it was referenced but
+   never stored anywhere, so backfill was non-actionable. Scoped PROPAGACIÓN to the
+   rule's `accion_asociada` (not a full re-audit). BATCH_SIZE 1→3 for the sweep.
+   Registers an OG rule (RULE-2026-001, alcance=todas) → ~66 pages ÷ 3 ≈ 22 runs.
+   Splice + rule-file steps: `seo-backfill-prompt-patch.md`.
 3. `agent_mailbox` feature (profile-namespaced), reads site-state.
 4. Editor-in-Chief triage cron (new chip) — only after mailbox has emitters.
 5. Agnostic infra: install build_sitestate.py via cont-init to a shared path.
