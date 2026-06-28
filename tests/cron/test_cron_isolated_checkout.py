@@ -194,6 +194,78 @@ class TestCleanup:
         assert source_repo.is_dir()  # still there
 
 
+class TestSafeDirectory:
+    def test_git_helper_disables_dubious_ownership_guard(self):
+        """Provisioning must tolerate a source tree owned by another user
+        (shared clone is hermes-owned; maintenance may run as root)."""
+        import cron.scheduler as sched
+
+        captured = {}
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        orig = sched.subprocess.run
+        sched.subprocess.run = fake_run
+        try:
+            sched._git(["clone", "--local", "/src", "/dst"])
+        finally:
+            sched.subprocess.run = orig
+
+        argv = captured["argv"]
+        assert argv[:3] == ["git", "-c", "safe.directory=*"]
+
+
+class TestCrossDeviceFallback:
+    def test_retries_without_hardlinks_on_cross_device(self, checkout_base, monkeypatch):
+        """When the base is on a different filesystem than the source, the
+        hardlink clone fails with 'Invalid cross-device link' and we must retry
+        with --no-hardlinks instead of aborting the run."""
+        import cron.scheduler as sched
+
+        calls = []
+
+        class R:
+            def __init__(self, rc, out="", err=""):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+
+        def fake_git(args, cwd=None, timeout=300):
+            calls.append(args)
+            if args[0] == "clone":
+                if "--no-hardlinks" not in args:
+                    return R(128, err="fatal: failed to create link ... Invalid cross-device link")
+                return R(0)  # retry succeeds
+            if args[:2] == ["remote", "get-url"]:
+                return R(0, out="https://github.com/x/y.git")
+            return R(0)
+
+        monkeypatch.setattr(sched, "_is_git_worktree", lambda p: True)
+        monkeypatch.setattr(sched, "_git", fake_git)
+        eff, cleanup = sched._provision_isolated_checkout("job", "bl", "/fake/src")
+        clone_calls = [c for c in calls if c[0] == "clone"]
+        assert len(clone_calls) == 2
+        assert "--no-hardlinks" in clone_calls[1]
+        sched._cleanup_isolated_checkout(cleanup)
+
+    def test_non_crossdevice_clone_failure_still_fails_closed(self, checkout_base, monkeypatch):
+        """A clone failure that ISN'T cross-device must not retry — it fails closed."""
+        import cron.scheduler as sched
+
+        class R:
+            returncode, stdout, stderr = 128, "", "fatal: some other error"
+
+        monkeypatch.setattr(sched, "_is_git_worktree", lambda p: True)
+        monkeypatch.setattr(sched, "_git", lambda *a, **k: R())
+        with pytest.raises(sched.IsolatedCheckoutError):
+            sched._provision_isolated_checkout("job", "bl", "/fake/src")
+
+
 class TestSweep:
     def test_sweeps_old_keeps_fresh(self, checkout_base):
         from cron.scheduler import _sweep_stale_checkouts

@@ -1351,8 +1351,13 @@ def _is_git_worktree(path: str) -> bool:
 
 def _git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> subprocess.CompletedProcess:
     popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+    # `-c safe.directory=*` so cloning/reading the source tree works even when it
+    # is owned by a different user than the one running the scheduler (a recurring
+    # container gotcha: the shared clone is hermes-owned, but maintenance may run
+    # as root). These calls only ever touch our own internal repos and clone
+    # --local runs no hooks, so disabling the dubious-ownership guard here is safe.
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "safe.directory=*", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -1394,6 +1399,14 @@ def _provision_isolated_checkout(
         # Copies only COMMITTED state, so any dirty edits in the shared tree are
         # intentionally left behind.
         res = _git(["clone", "--local", "--quiet", workdir, ephemeral])
+        if res.returncode != 0 and "cross-device" in (res.stderr or "").lower():
+            # Checkout base is on a different filesystem than the source (e.g.
+            # base on /tmp, source on the /opt/data volume). git's default
+            # hardlinking can't span devices — retry copying the objects instead.
+            # Co-locate the base with the source (HERMES_CRON_CHECKOUT_DIR) to keep
+            # the fast hardlink path.
+            shutil.rmtree(ephemeral, ignore_errors=True)
+            res = _git(["clone", "--local", "--no-hardlinks", "--quiet", workdir, ephemeral])
         if res.returncode != 0:
             raise IsolatedCheckoutError(
                 f"git clone --local failed ({res.returncode}): {res.stderr.strip()}"
