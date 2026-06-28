@@ -25,14 +25,20 @@ from html.parser import HTMLParser
 
 
 class _LinkExtractor(HTMLParser):
-    """Collect internal <a href> targets, normalized to absolute site URLs."""
+    """Collect internal <a href> targets (absolute site URLs) and count body words."""
+
+    _SKIP_TAGS = ("script", "style", "noscript", "template")
 
     def __init__(self, site_base):
         super().__init__()
         self.site_base = site_base.rstrip("/")
         self.links = []
+        self._texts = []
+        self._skip_depth = 0
 
     def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
         if tag != "a":
             return
         for attr, val in attrs:
@@ -43,6 +49,17 @@ class _LinkExtractor(HTMLParser):
                 self.links.append(v)
             elif v.startswith("/") and not v.startswith("//"):
                 self.links.append(self.site_base + v)
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if self._skip_depth == 0 and data.strip():
+            self._texts.append(data)
+
+    def word_count(self):
+        return len(" ".join(self._texts).split())
 
 
 def _url_for(rel_path, site_base):
@@ -65,10 +82,11 @@ def build_graph(web_dir, site_base):
                     html = fh.read()
                 ex = _LinkExtractor(site_base)
                 ex.feed(html)
-                graph[url] = {"outbound": sorted(set(ex.links)), "inbound": []}
+                graph[url] = {"outbound": sorted(set(ex.links)), "inbound": [],
+                              "word_count": ex.word_count()}
             except Exception as e:  # noqa: BLE001 — log and continue
                 errors.append(f"{url}: {e}")
-                graph[url] = {"outbound": [], "inbound": []}
+                graph[url] = {"outbound": [], "inbound": [], "word_count": 0}
     # inbound = inverse of outbound, restricted to edges whose target is a page
     for src, data in graph.items():
         for tgt in data["outbound"]:
