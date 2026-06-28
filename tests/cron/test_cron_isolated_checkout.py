@@ -194,6 +194,34 @@ class TestCleanup:
         assert source_repo.is_dir()  # still there
 
 
+class TestSafeDirectory:
+    def test_git_helper_disables_dubious_ownership_guard(self):
+        """Provisioning must tolerate a source tree owned by another user
+        (shared clone is hermes-owned; maintenance may run as root)."""
+        import cron.scheduler as sched
+
+        captured = {}
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        orig = sched.subprocess.run
+        sched.subprocess.run = fake_run
+        try:
+            sched._git(["clone", "--local", "/src", "/dst"])
+        finally:
+            sched.subprocess.run = orig
+
+        argv = captured["argv"]
+        assert argv[:3] == ["git", "-c", "safe.directory=*"]
+
+
 class TestSweep:
     def test_sweeps_old_keeps_fresh(self, checkout_base):
         from cron.scheduler import _sweep_stale_checkouts

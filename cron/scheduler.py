@@ -1351,8 +1351,13 @@ def _is_git_worktree(path: str) -> bool:
 
 def _git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> subprocess.CompletedProcess:
     popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+    # `-c safe.directory=*` so cloning/reading the source tree works even when it
+    # is owned by a different user than the one running the scheduler (a recurring
+    # container gotcha: the shared clone is hermes-owned, but maintenance may run
+    # as root). These calls only ever touch our own internal repos and clone
+    # --local runs no hooks, so disabling the dubious-ownership guard here is safe.
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "safe.directory=*", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
