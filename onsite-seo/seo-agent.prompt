@@ -162,6 +162,40 @@ Uso (NO sustituye a ninguna acción; les da señal persistente y cross-run):
 - Es la fuente que leerán futuros handoffs inter-agente (p.ej. proponer la fusión de
   2 URLs que canibalizan).
 
+**[HANDOFF INTER-AGENTE — EMISOR (contenido fino)]**
+
+Tras construir [ESTADO DEL SITIO], puedes DELEGAR trabajo que no es tuyo al agente de
+contenido (gap-hunter, job `ce583d11dedd`) a través del buzón compartido. v1: una sola
+señal — contenido fino. Las guardas (dedupe, max-hops, TTL, lock por-página) las aplica
+el helper; tú solo encolas y disparas. NO uses execute_code ni `python3 -c/-e`: invoca
+el helper POR RUTA con el tool `terminal`.
+
+  BUZÓN  : /opt/data/profiles/biglobster/agent-mailbox.json   (por perfil, FUERA del clon)
+  HELPER : /opt/data/profiles/biglobster/mailbox.py
+  THIN_WORDS = 400 · MAX_EMISIONES_POR_CICLO = 2
+
+Procedimiento (una sola pasada por ciclo):
+1. GC de peticiones vencidas:
+     python3 /opt/data/profiles/biglobster/mailbox.py --mailbox <BUZÓN> expire-sweep
+2. De [ESTADO DEL SITIO], lista URLs de ARTÍCULO (web/blog/<slug>.html) con
+   `word_count` < THIN_WORDS. Excluye no-artículos (home, landings, plantillas, 404).
+   Ordena por word_count ascendente; toma como máximo MAX_EMISIONES_POR_CICLO.
+3. Encola cada una (el helper deduplica solo: si ya hay una viva para esa URL imprime
+   DUPLICATE y no crea otra):
+     python3 .../mailbox.py --mailbox <BUZÓN> enqueue \
+       --type expand_thin_content --from onsite-seo --to content \
+       --url <URL_ABSOLUTA> --payload '{"word_count": <N>, "reason": "thin"}'
+   Anota el id devuelto (u OK/DUPLICATE).
+4. Si encolaste ≥1 petición NUEVA, despierta al consumidor (handoff REACTIVO): usa el
+   tool `cronjob` para disparar el job `ce583d11dedd`.
+   FALLBACK: si el tool `cronjob` no está disponible o el disparo falla, NO es fatal —
+   la petición queda en el buzón y el gap-hunter la recogerá en su próxima ejecución
+   programada. Regístralo como ALERTA informativa (no como error).
+5. Reporta en Telegram una sección "🤝 Handoffs": nº de peticiones nuevas, URLs, y si
+   el disparo reactivo funcionó o quedó en fallback.
+
+Tú NUNCA editas el contenido del artículo del otro agente; solo señalas y delegas.
+
 **[DETECCIÓN DE DELTAS — QUÉ MERECE ATENCIÓN HOY]**
 Aplica solo en modo MANTENIMIENTO. Una URL entra al batch únicamente si dispara uno o más de estos triggers:
 1. Contenido nuevo: URL presente en sitemap.xml / DB con fecha de creación posterior a tu última ejecución, y sin registro en el ledger. → Auditoría completa + enlazado estratégico hacia/desde contenido pilar (Acción 1), solo si el enlace aporta valor real.
