@@ -248,8 +248,10 @@ LIST, but the live site already emitted full OG via templates. Slice 2 (Acción 
 is therefore a harmless safety net, not a real win. The PROPAGACIÓN/registry infra
 (PR #91) is still valuable and reusable; the OG rule itself was a no-op.
 → Before declaring a capability "missing", grep the actual site output, not just the
-prompt's action list. CWV (Acción 11) likely also handled by templates — verify
-before assuming value. See [[check-site-output-before-capability-gap]].
+prompt's action list. CWV (Acción 11) ALSO confirmed redundant: 229/229 images
+already have `loading=`, dimensions present site-wide — templates handle it. Both
+slice-2 actions were already produced by the templates. See
+[[check-site-output-before-capability-gap]].
 
 Bookkeeping: BATCH_SIZE can drop back to 1 (the 3-for-sweep window never materialized).
 PR #91 still worth merging (registry infra). Pivot next to `agent_mailbox` (novel work).
