@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -1296,6 +1297,176 @@ def _scan_assembled_cron_prompt(assembled: str, job: dict, *, has_skills: bool =
     return assembled
 
 
+# ---------------------------------------------------------------------------
+# Per-run isolated checkouts
+#
+# Multiple cron AGENT jobs used to share one physical git working tree as their
+# workdir (e.g. /opt/data/biglobster for the biglobster SEO agent + the content
+# gap-hunter). Uncommitted edits from one agent survived in the shared tree, and
+# the next agent's "clean tree" protocol (`git checkout -- <tracked file>`)
+# reverted them — a near-miss data-loss class (2026-06-28). The agent-mailbox
+# page-lock is a JSON advisory lock; it never locks the filesystem.
+#
+# Fix: when an agent job's workdir is a git working tree, the scheduler runs the
+# agent in an EPHEMERAL local clone of that tree (one per run) and removes it
+# afterwards. The agent physically cannot reach the shared tree, so two agents
+# running close together can never clobber each other's uncommitted work. A fresh
+# clone always starts from clean committed origin/main, so prior-run leftovers
+# vanish too. The per-URL atomic commit+push-to-main flow is unchanged — it just
+# happens inside the clone.
+#
+# Scope: AGENT jobs only. no_agent script jobs keep their configured workdir
+# (they rely on stable absolute paths and are read-mostly). Disable globally with
+# HERMES_CRON_ISOLATE_WORKDIR=0. Override the ephemeral base with
+# HERMES_CRON_CHECKOUT_DIR (must be writable by the agent user).
+# ---------------------------------------------------------------------------
+
+_CHECKOUT_PREFIX = "cron-checkout-"
+
+
+class IsolatedCheckoutError(RuntimeError):
+    """Provisioning an isolated checkout failed; the run must abort (fail-closed).
+
+    We never silently fall back to the shared working tree — that is exactly the
+    clobber hazard this machinery exists to prevent.
+    """
+
+
+def _isolation_enabled() -> bool:
+    raw = (os.environ.get("HERMES_CRON_ISOLATE_WORKDIR") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _checkout_base() -> str:
+    return (os.environ.get("HERMES_CRON_CHECKOUT_DIR") or "").strip() or tempfile.gettempdir()
+
+
+def _is_git_worktree(path: str) -> bool:
+    """True when ``path`` is a git working tree (has a .git dir or file)."""
+    try:
+        return (Path(path) / ".git").exists()
+    except OSError:
+        return False
+
+
+def _git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> subprocess.CompletedProcess:
+    popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        **popen_kwargs,
+    )
+
+
+def _provision_isolated_checkout(
+    job_id: str, profile: Optional[str], workdir: str
+) -> tuple[str, Optional[str]]:
+    """Provision an ephemeral local clone of ``workdir`` for this run.
+
+    Returns ``(effective_workdir, cleanup_path)``. ``cleanup_path`` is the
+    ephemeral dir to remove after the run, or ``None`` when no isolation was
+    applied (kill-switch off, or workdir is not a git working tree) — in which
+    case ``effective_workdir == workdir``.
+
+    Raises :class:`IsolatedCheckoutError` when isolation is required but the
+    clone cannot be produced (fail-closed — never run a write-agent on the shared
+    tree).
+    """
+    if not _isolation_enabled():
+        return workdir, None
+    if not workdir or not _is_git_worktree(workdir):
+        return workdir, None
+
+    base = _checkout_base()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError as e:
+        raise IsolatedCheckoutError(f"checkout base {base!r} not usable: {e}") from e
+
+    slug = "".join(c for c in (profile or "x") if c.isalnum() or c in "-_") or "x"
+    ephemeral = tempfile.mkdtemp(prefix=f"{_CHECKOUT_PREFIX}{slug}-{job_id}-", dir=base)
+
+    try:
+        # Local clone: hardlinks objects from the source — fast and disk-cheap.
+        # Copies only COMMITTED state, so any dirty edits in the shared tree are
+        # intentionally left behind.
+        res = _git(["clone", "--local", "--quiet", workdir, ephemeral])
+        if res.returncode != 0:
+            raise IsolatedCheckoutError(
+                f"git clone --local failed ({res.returncode}): {res.stderr.strip()}"
+            )
+
+        # Point origin at the SOURCE tree's real remote (GitHub), so the agent's
+        # push lands upstream rather than in the local clone. A local clone sets
+        # origin to the source path otherwise.
+        src_origin = _git(["remote", "get-url", "origin"], cwd=workdir)
+        if src_origin.returncode == 0 and src_origin.stdout.strip():
+            _git(["remote", "set-url", "origin", src_origin.stdout.strip()], cwd=ephemeral)
+
+        # A fresh clone inherits no local config — copy commit identity and any
+        # credential helper so commit+push behave exactly as on the shared tree.
+        dumped = _git(["config", "--local", "--get-regexp", r"^(user|credential)\."], cwd=workdir)
+        if dumped.returncode == 0:
+            for line in dumped.stdout.splitlines():
+                line = line.strip()
+                if not line or " " not in line:
+                    continue
+                key, value = line.split(" ", 1)
+                _git(["config", "--local", key, value], cwd=ephemeral)
+    except IsolatedCheckoutError:
+        shutil.rmtree(ephemeral, ignore_errors=True)
+        raise
+    except (subprocess.SubprocessError, OSError) as e:
+        shutil.rmtree(ephemeral, ignore_errors=True)
+        raise IsolatedCheckoutError(f"provisioning isolated checkout failed: {e}") from e
+
+    logger.info("Job '%s': isolated checkout %s (from %s)", job_id, ephemeral, workdir)
+    return ephemeral, ephemeral
+
+
+def _cleanup_isolated_checkout(path: Optional[str]) -> None:
+    """Remove an ephemeral checkout. Guarded: only ever under the checkout base."""
+    if not path:
+        return
+    try:
+        base = os.path.realpath(_checkout_base())
+        real = os.path.realpath(path)
+        under_base = os.path.commonpath([base, real]) == base
+        is_ephemeral = os.path.basename(real).startswith(_CHECKOUT_PREFIX)
+        if not (under_base and is_ephemeral):
+            # Refuse to delete anything that isn't one of our ephemeral dirs.
+            logger.warning("Refusing to clean non-ephemeral path %r", path)
+            return
+        shutil.rmtree(real, ignore_errors=True)
+    except (OSError, ValueError) as e:
+        logger.debug("Isolated checkout cleanup failed for %r: %s", path, e)
+
+
+def _sweep_stale_checkouts(max_age_h: float = 6.0) -> None:
+    """Best-effort reap of ephemeral checkouts leaked by crashed runs."""
+    import time
+
+    base = _checkout_base()
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return
+    cutoff = time.time() - max_age_h * 3600
+    for name in entries:
+        if not name.startswith(_CHECKOUT_PREFIX):
+            continue
+        full = os.path.join(base, name)
+        try:
+            if os.path.isdir(full) and os.path.getmtime(full) < cutoff:
+                shutil.rmtree(full, ignore_errors=True)
+                logger.info("Swept stale isolated checkout %s", full)
+        except OSError:
+            continue
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job, applying any per-job profile override."""
     job_id = job["id"]
@@ -1554,6 +1725,23 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             job_id, _job_workdir,
         )
         _job_workdir = None
+
+    # Isolate write-work in an ephemeral per-run clone when the workdir is a git
+    # working tree, so concurrent agents can never clobber each other's
+    # uncommitted changes on a shared tree (2026-06-28 near-miss). Fail-closed:
+    # if isolation is required but cannot be provisioned, abort rather than run
+    # the agent against the shared tree.
+    _isolated_checkout: Optional[str] = None
+    if _job_workdir:
+        try:
+            _job_workdir, _isolated_checkout = _provision_isolated_checkout(
+                job_id, job.get("profile"), _job_workdir
+            )
+        except IsolatedCheckoutError as e:
+            err = f"isolated checkout provisioning failed: {e}"
+            logger.error("Job '%s': %s — aborting run (fail-closed)", job_id, err)
+            return False, "", "", err
+
     _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
     if _job_workdir:
         os.environ["TERMINAL_CWD"] = _job_workdir
@@ -1916,6 +2104,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 os.environ.pop("TERMINAL_CWD", None)
             else:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
+        # Remove this run's ephemeral isolated checkout, if one was provisioned.
+        _cleanup_isolated_checkout(_isolated_checkout)
         # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
@@ -2122,6 +2312,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             _kill_orphaned_mcp_children()
         except Exception as _e:
             logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
+
+        # Reap ephemeral isolated checkouts leaked by crashed/killed runs.
+        try:
+            _sweep_stale_checkouts()
+        except Exception as _e:
+            logger.debug("Post-tick isolated-checkout sweep failed: %s", _e)
 
         return sum(_results)
     finally:
