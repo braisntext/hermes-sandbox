@@ -68,6 +68,11 @@ Ruta canónica del ledger: `/opt/data/profiles/biglobster/seo/seo-ledger.json`. 
 inicio de cada ciclo y escríbelo ahí al final. NUNCA lo guardes en
 `.credentials/` ni en otra ruta.
 
+Para LEER/ESCRIBIR el ledger y para cualquier cálculo de fechas (p.ej. la evaluación
+retroactiva a 14/30 días) usa los tools `read_file` / `write_file` / `terminal`
+(`cat`, `date`). NUNCA uses `execute_code` ni `python3 -c/-e`: el sandbox de cron los
+bloquea y desperdicias iteraciones.
+
 Reglas de uso:
 * Marca baseline_complete = true solo cuando todas las acciones aplicables a esa URL se hayan ejecutado al menos una vez (o registrado como no-aplicables).
 * Guarda ultimo_commit_visto y autor_ultimo_commit al final de cada pasada (ver Detección de Deltas, trigger #2)
@@ -132,7 +137,11 @@ constructor determinista YA INSTALADO, invocándolo por RUTA con el tool `termin
          --pillar https://biglobster.top/blog.html \
          --pillar https://biglobster.top/agents.html \
          --pillar https://biglobster.top/clientes.html \
+         --pillar https://biglobster.top/404.html \
+         --pillar https://biglobster.top/blog/infografias/canonical-infographic-template.html \
          --merge
+   Los dos últimos --pillar excluyen falsos huérfanos (página 404 y plantilla de
+   infografía) que por naturaleza no llevan enlaces internos entrantes.
    `--merge` preserva keyword_url_map/cannibalization de la corrida anterior.
    Revisa el stdout: imprime `pages=… orphans=… commit=…`.
 2. Lee `/opt/data/profiles/biglobster/seo/site-state.json` (tool `read_file` o

@@ -205,3 +205,23 @@ cannibalization stay agent/GSC-populated.
 **Secondary follow-up (not blocking):** if the run still overruns 90 iterations once
 unblocked, bump `HERMES_MAX_ITERATIONS`. Agnostic follow-up: install the helper via
 cont-init to a shared path instead of per-profile hand-copy.
+
+### VERIFIED LANDED — trace c21a7866 (2026-06-28, run #2)
+Slice works end to end after deploying the helper + `chown hermes:hermes`:
+- `build_sitestate.py` ran via `terminal` → `exit_code:0`, `pages=66 orphans=4
+  commit=bc0cd771…`. NO BLOCKED error. (commit populated = ran as hermes, not root.)
+- Mode = **MANTENIMIENTO** (ledger readable now; CATCH-UP fallback gone).
+- Run **completed with the Telegram report** in ~3 min / 45 obs (was ~12 min / 201).
+  No iteration-cap overrun — reclaimed budget as predicted.
+- Awareness is live: report Insights cite "el grafo interno muestra 4 huérfanos
+  persistentes". Agent correctly did nothing (steady state) — observable, explained.
+
+Refinements applied this round:
+- Orphan false positives excluded via `--pillar`: `/404.html` and
+  `/blog/infografias/canonical-infographic-template.html` (real orphans kept:
+  caso-exitoso-quickpay, sostenibilidad-esg-pymes-espana-2026).
+- Prompt now steers ledger reads/date-math to read_file/write_file/terminal (the
+  agent still reached for execute_code once for ledger math → blocked, harmless).
+
+Still open: re-apply the updated `[ESTADO DEL SITIO]` + ledger note + 2 new --pillar
+lines to the live `jobs.json` (repo is now ahead of live again).

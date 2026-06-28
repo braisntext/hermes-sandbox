@@ -59,7 +59,10 @@ el tool `terminal`:
          --pillar https://biglobster.top/blog.html \
          --pillar https://biglobster.top/agents.html \
          --pillar https://biglobster.top/clientes.html \
+         --pillar https://biglobster.top/404.html \
+         --pillar https://biglobster.top/blog/infografias/canonical-infographic-template.html \
          --merge
+   (los dos últimos --pillar excluyen falsos huérfanos: 404 + plantilla infografía)
 2. Lee el site-state.json (read_file / cat) para las decisiones del día.
 3. (Opcional) Aumenta keyword_url_map con UNA consulta GSC y recalcula
    cannibalization; reescribe con el tool `write_file` (NUNCA python -c).
