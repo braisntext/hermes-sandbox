@@ -100,13 +100,16 @@ durable, CEO-visible, lives OUTSIDE the shared clone (dodges cover-wipe hazard).
 
 Every artifact takes a `profile` param from day one (profile-first, not retrofit).
 
-1. **Slice 1 (next): site-LEVEL awareness aggregate.** Persist an internal-link
-   graph + keyword→URL map alongside the existing per-URL ledger. Per-profile
-   volume path. Folds in the two prompt defects. Spec below.
-2. Remaining genuinely-new capabilities (Open Graph/social meta, CWV hints) — the
-   only two Table-2 items not already covered by the live 10 actions.
+1. **Slice 1 (DONE, merged #89): site-LEVEL awareness aggregate.** Internal-link
+   graph + orphans via cron-safe helper. Verified trace c21a7866.
+2. **Slice 2 (DONE, this branch): Open Graph + CWV capabilities** — the only two
+   Table-2 items not already in the live actions. Prompt-only (no helper): Acción 10
+   (OG/Twitter meta, full auto-inject from page content) + Acción 11 (CWV, mostly
+   advisory — auto only lazy-load below-fold imgs + eager/fetchpriority hero; alert
+   for JS/CSS load-order). Splice doc: `seo-og-cwv-prompt-patch.md`.
 3. `agent_mailbox` feature (profile-namespaced), reads site-state.
 4. Editor-in-Chief triage cron (new chip) — only after mailbox has emitters.
+5. Agnostic infra: install build_sitestate.py via cont-init to a shared path.
 
 ---
 

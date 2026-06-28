@@ -273,7 +273,7 @@ Selecciona las `BATCH_SIZE` URLs con mayor score. Documenta el ranking completo 
 
 ---
 
-**[DAILY WORKFLOW — 10 ACCIONES CORE]**
+**[DAILY WORKFLOW — 11 ACCIONES CORE]**
 
 Antes de empezar, comprueba `git status`. Si hay cambios SIN COMMITEAR en
 archivos de blog/artículo (restos de un ciclo anterior cortado a media URL),
@@ -343,6 +343,24 @@ transacción atómica independiente.
 - **GEO Gap:** Para cada URL del batch, verifica si los conceptos semánticos principales tienen una definición directa y autocontenida que un LLM pudiera citar literalmente. Si falta, añade un callout box con la definición (usa `<aside>` o `<div class="geo-callout">`).
 - Límite: máximo 3 bloques FAQ nuevos por URL por ciclo.
 
+**Acción 10 — Open Graph y Twitter Cards (metadatos sociales)**
+- Comprueba en el `<head>` de la URL las etiquetas Open Graph y Twitter Card. Si faltan o están incompletas, genera e inyecta (mismo tipo de edición en `<head>` que Acciones 6 y 7):
+  - `og:title` (= `<title>` o H1), `og:description` (= `<meta description>`), `og:type` (`article` en blog, `website` en landings), `og:url` (URL canónica de la página), `og:image` (imagen de portada del artículo, URL ABSOLUTA `https://biglobster.top/...`), `og:site_name` (`BigLobster`).
+  - `twitter:card` (`summary_large_image`), `twitter:title`, `twitter:description`, `twitter:image` (misma imagen que `og:image`).
+- Deriva TODOS los valores del contenido YA presente en la página (title, meta description, imagen de portada, canonical). NUNCA inventes datos: si no hay imagen de portada identificable, OMITE `og:image`/`twitter:image` (no uses placeholders).
+- Idempotencia: si las etiquetas OG ya existen y son válidas, OMITE la acción y documenta el skip. Nunca dupliques etiquetas.
+
+**Acción 11 — Core Web Vitals (auditoría + fixes seguros)**
+- Audita señales de CWV en la URL. Aplica SOLO el subconjunto SEGURO de forma automática; todo lo demás es ALERTA de revisión humana. NUNCA modifiques automáticamente la carga de JS/CSS: un error ahí rompe el render.
+  - SEGURO (auto-aplica, mecánico y reversible):
+    - La PRIMERA imagen de contenido (hero/LCP) debe cargar eager: si tiene `loading="lazy"`, quítalo, y añade `fetchpriority="high"` si no lo tiene.
+    - Las imágenes SIGUIENTES (bajo el pliegue) sin atributo `loading`: añade `loading="lazy"`.
+  - ALERTA (solo reporta, NO auto-modifiques):
+    - `<img>` sin `width`/`height` (riesgo CLS) → alerta para que un humano añada dimensiones.
+    - `<script>` de terceros sin `defer`/`async`, CSS bloqueante, o falta de `<link rel="preload">` para recursos críticos.
+- NUNCA añadas/quites `defer`, `async`, `preload` ni reordenes scripts de forma automática: solo alerta.
+- Idempotencia: no re-apliques `loading="lazy"` ni `fetchpriority` si ya están presentes.
+
 ---
 
 **[EXECUTION & SAFETY PROTOCOLS]**
@@ -389,7 +407,7 @@ Mantén un tono corporativo, tecnológico, pragmático y orientado a resolver pr
   "url": "https://biglobster.top/...",
   "fecha": "YYYY-MM-DD",
   "accion_realizada": "descripción concisa de qué se modificó",
-  "tipo_accion": "clustering | geo_entidades | refresco | canibalización | legibilidad | schema | ctr | salud | content_gap | URLs modificadas hoy ",
+  "tipo_accion": "clustering | geo_entidades | refresco | canibalización | legibilidad | schema | ctr | salud | content_gap | open_graph | cwv | URLs modificadas hoy ",
   "metrica_objetivo": "CTR | Posición | Clics | Impresiones",
   "valor_metrica_antes": 0.00,
   "valor_metrica_despues": null,
