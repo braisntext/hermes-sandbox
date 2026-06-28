@@ -1399,6 +1399,14 @@ def _provision_isolated_checkout(
         # Copies only COMMITTED state, so any dirty edits in the shared tree are
         # intentionally left behind.
         res = _git(["clone", "--local", "--quiet", workdir, ephemeral])
+        if res.returncode != 0 and "cross-device" in (res.stderr or "").lower():
+            # Checkout base is on a different filesystem than the source (e.g.
+            # base on /tmp, source on the /opt/data volume). git's default
+            # hardlinking can't span devices — retry copying the objects instead.
+            # Co-locate the base with the source (HERMES_CRON_CHECKOUT_DIR) to keep
+            # the fast hardlink path.
+            shutil.rmtree(ephemeral, ignore_errors=True)
+            res = _git(["clone", "--local", "--no-hardlinks", "--quiet", workdir, ephemeral])
         if res.returncode != 0:
             raise IsolatedCheckoutError(
                 f"git clone --local failed ({res.returncode}): {res.stderr.strip()}"
