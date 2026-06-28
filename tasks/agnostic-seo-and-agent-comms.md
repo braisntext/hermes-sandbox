@@ -234,3 +234,22 @@ Refinements applied this round:
 
 Still open: re-apply the updated `[ESTADO DEL SITIO]` + ledger note + 2 new --pillar
 lines to the live `jobs.json` (repo is now ahead of live again).
+
+### SLICE 2 OUTCOME — OG was already done by the site templates (trace e5fc2041)
+The OG backfill (RULE-2026-001) ran end-to-end and correctly found **no work**: the
+agent grepped all pages, found OG present everywhere, marked the rule satisfied,
+flipped `propagacion_pendiente=false`, returned to MANTENIMIENTO. A rigorous
+completeness check (all of og:title/description/image/url + twitter:card per page)
+confirmed it: only `web/blog/infografias/canonical-infographic-template.html` (a
+template, not a page — already excluded) lacks OG. Every real page is complete.
+
+**Lesson (own it):** OG was diagnosed as a capability gap from the agent's ACTION
+LIST, but the live site already emitted full OG via templates. Slice 2 (Acción 10/11)
+is therefore a harmless safety net, not a real win. The PROPAGACIÓN/registry infra
+(PR #91) is still valuable and reusable; the OG rule itself was a no-op.
+→ Before declaring a capability "missing", grep the actual site output, not just the
+prompt's action list. CWV (Acción 11) likely also handled by templates — verify
+before assuming value. See [[check-site-output-before-capability-gap]].
+
+Bookkeeping: BATCH_SIZE can drop back to 1 (the 3-for-sweep window never materialized).
+PR #91 still worth merging (registry infra). Pivot next to `agent_mailbox` (novel work).
