@@ -41,16 +41,36 @@ Esquema:
 ```
 
 Procedimiento de reconstrucción (inicio de ciclo — acotado y de solo lectura):
-1. Parsea los HTML del repo ya clonado (`web/blog/*.html`, `web/*.html`) con un
-   parser HTML real (NO regex). Extrae los `<a href>` internos de cada página y
-   construye `internal_link_graph`: `outbound` directo; `inbound` = inverso del
-   conjunto de `outbound`.
-2. Deriva `orphans` = URLs con `inbound` vacío (excluye la home y las páginas pilar
-   raíz, que legítimamente no necesitan enlaces entrantes).
-3. Una sola consulta GSC (query→página, 30d) para refrescar `keyword_url_map`;
-   deriva `cannibalization` = queries con ≥2 URLs distintas.
-4. Escribe el archivo COMPLETO y válido (JSON parseable). Si el parseo de una página
-   falla, regístralo y continúa: un site-state parcial es mejor que ninguno.
+
+IMPORTANTE: NO uses `execute_code` ni `python3 -c/-e` (el sandbox de cron los
+bloquea). Usa el constructor determinista YA INSTALADO, invocándolo por RUTA con
+el tool `terminal`:
+
+1. Ejecuta:
+       python3 /opt/data/profiles/biglobster/seo/build_sitestate.py \
+         --web-dir /opt/data/biglobster/web \
+         --site-base https://biglobster.top \
+         --out /opt/data/profiles/biglobster/seo/site-state.json \
+         --repo /opt/data/biglobster \
+         --pillar https://biglobster.top/ \
+         --pillar https://biglobster.top/services.html \
+         --pillar https://biglobster.top/pricing.html \
+         --pillar https://biglobster.top/contact.html \
+         --pillar https://biglobster.top/blog.html \
+         --pillar https://biglobster.top/agents.html \
+         --pillar https://biglobster.top/clientes.html \
+         --merge
+2. Lee el site-state.json (read_file / cat) para las decisiones del día.
+3. (Opcional) Aumenta keyword_url_map con UNA consulta GSC y recalcula
+   cannibalization; reescribe con el tool `write_file` (NUNCA python -c).
+4. Si el constructor falla (permisos / ausente / web-dir): ALERTA + continúa con
+   el ledger por-URL. Un site-state ausente NO aborta el ciclo.
+
+> POR QUÉ HELPER Y NO INLINE: el trace b1d30a47 (2026-06-28) probó que el sandbox
+> de cron BLOQUEA `execute_code` y `python3 -c` ("código sin aprobación humana").
+> El agente no pudo escribir site-state.json y degradó a grep. El script commiteado
+> invocado por ruta es una ejecución de archivo normal → pasa el gate, es
+> determinista y auditable.
 
 Uso (NO sustituye a ninguna acción; les da señal persistente y cross-run):
 - El trigger de huérfanos ([DETECCIÓN DE DELTAS] #3) y `Flag_canibalización` del
@@ -99,6 +119,34 @@ Tres añadidos de una línea cada uno:
 - **Acción 4 (canibalización):** sustituir el arranque por
   "Parte de la lista `cannibalization` ya calculada en [ESTADO DEL SITIO]; confirma
   en GSC consultas donde ≥2 URLs…".
+
+---
+
+## DESPLIEGUE — pasos manuales en el volumen (ANTES de la próxima corrida)
+
+El trace b1d30a47 mostró además `Permission denied` en el dir seo (root-owned) y
+que el script aún no está instalado. Pasos (ajusta el usuario del agente):
+
+```
+# 1. Instala el constructor en la ruta que invoca el prompt
+mkdir -p /opt/data/profiles/biglobster/seo
+cp build_sitestate.py /opt/data/profiles/biglobster/seo/build_sitestate.py
+
+# 2. Da propiedad del dir al usuario del agente (NO dejar root-owned)
+chown -R <usuario-agente>:<usuario-agente> /opt/data/profiles/biglobster/seo
+chmod 0755 /opt/data/profiles/biglobster/seo/build_sitestate.py
+
+# 3. Verifica que el agente puede leer/escribir ahí (como ese usuario):
+#    python3 /opt/data/profiles/biglobster/seo/build_sitestate.py --help
+```
+
+Fuente de record del script: `onsite-seo/build_sitestate.py` en el repo hermes.
+(Agnóstico: para otros perfiles, instalar el MISMO script e invocar con sus args.
+Seguimiento: instalar vía cont-init en una ruta compartida en vez de copiar a mano.)
+
+Verificación tras la corrida: `python3 -c` NO debe aparecer bloqueado en el trace;
+`site-state.json` DEBE existir con `pages>0`; el modo NO debe ser CATCH-UP por
+"ledger ilegible".
 
 ---
 

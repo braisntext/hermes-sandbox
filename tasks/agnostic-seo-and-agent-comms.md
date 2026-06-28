@@ -174,8 +174,34 @@ read-only at run start after PASO 0:
 parse failure beats none; site-state is READ-ONLY for the day's decisions (observe,
 don't "optimize" it); never write it inside `/opt/data/biglobster`.
 
-## Repo-hygiene gap (offer, not in slice)
-Unlike offsite-geo/infographic/auditor, the onsite-SEO prompt has **no repo copy** —
-it lives only in `jobs.json` on the volume. Consider checking it in as
-`onsite-seo/seo-agent.prompt` for version control + auditor review, accepting the
-known repo-vs-live independence gotcha.
+## Repo-hygiene gap (DONE)
+The onsite-SEO prompt is now checked in as `onsite-seo/seo-agent.prompt` (was only in
+`jobs.json` on the volume). Repo-vs-live independence gotcha still applies: edits need
+to land in BOTH.
+
+## First live run — trace b1d30a47 (2026-06-28): slice BLOCKED, root-caused, fixed
+
+Pulled the run via Langfuse. Awareness slice did NOT land first try; trace resolved
+the prompt-driven-vs-helper fork with evidence:
+
+- **Cron sandbox blocks inline code.** `execute_code` → BLOCKED ("arbitrary local
+  Python, no approver"); `python3 -c` → BLOCKED ("dangerous -e/-c flag"). The agent
+  couldn't build the graph inline; `site-state.json` was never written. It degraded to
+  grep and still found 2 real orphans (`sostenibilidad-esg`, `caso-exitoso-quickpay`).
+- **Dir perms:** `/opt/data/profiles/biglobster/seo/` → `Permission denied` (root-owned).
+- **Mode → CATCH-UP** because the ledger was unreadable (perms / none yet).
+- **Hit iteration cap (90 LLM calls) mid-task**, no Telegram report; much budget burned
+  retrying the blocked Python.
+- **NOT credits:** 90 calls, ~76.6k in / 13.7k out tokens, 0 model errors.
+
+### Fork RESOLVED → deterministic committed helper
+`onsite-seo/build_sitestate.py` (stdlib-only, arg-driven, atomic write, `--merge` to
+keep GSC fields). Agent invokes it BY PATH via `terminal` → normal file execution,
+clears the approval gate; versioned + auditable. Prompt `[ESTADO DEL SITIO]` now calls
+it. Smoke-tested locally (5 pages → 1 orphan, inbound correct). Deploy + `chown` in
+`seo-awareness-prompt-patch.md`. Helper builds the file-derived part; keyword_url_map/
+cannibalization stay agent/GSC-populated.
+
+**Secondary follow-up (not blocking):** if the run still overruns 90 iterations once
+unblocked, bump `HERMES_MAX_ITERATIONS`. Agnostic follow-up: install the helper via
+cont-init to a shared path instead of per-profile hand-copy.

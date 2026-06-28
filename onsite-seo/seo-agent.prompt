@@ -113,16 +113,36 @@ Esquema:
 ```
 
 Procedimiento de reconstrucción (inicio de ciclo — acotado y de solo lectura):
-1. Parsea los HTML del repo ya clonado (`web/blog/*.html`, `web/*.html`) con un
-   parser HTML real (NO regex). Extrae los `<a href>` internos de cada página y
-   construye `internal_link_graph`: `outbound` directo; `inbound` = inverso del
-   conjunto de `outbound`.
-2. Deriva `orphans` = URLs con `inbound` vacío (excluye la home y las páginas pilar
-   raíz, que legítimamente no necesitan enlaces entrantes).
-3. Una sola consulta GSC (query→página, 30d) para refrescar `keyword_url_map`;
-   deriva `cannibalization` = queries con ≥2 URLs distintas.
-4. Escribe el archivo COMPLETO y válido (JSON parseable). Si el parseo de una página
-   falla, regístralo y continúa: un site-state parcial es mejor que ninguno.
+
+IMPORTANTE: NO uses `execute_code` ni `python3 -c/-e` para construir el grafo: el
+sandbox de cron los bloquea (código arbitrario sin aprobación humana). Usa el
+constructor determinista YA INSTALADO, invocándolo por RUTA con el tool `terminal`:
+
+1. Ejecuta el constructor (construye internal_link_graph con un parser HTML real,
+   inbound, y orphans, y escribe el archivo de forma ATÓMICA):
+       python3 /opt/data/profiles/biglobster/seo/build_sitestate.py \
+         --web-dir /opt/data/biglobster/web \
+         --site-base https://biglobster.top \
+         --out /opt/data/profiles/biglobster/seo/site-state.json \
+         --repo /opt/data/biglobster \
+         --pillar https://biglobster.top/ \
+         --pillar https://biglobster.top/services.html \
+         --pillar https://biglobster.top/pricing.html \
+         --pillar https://biglobster.top/contact.html \
+         --pillar https://biglobster.top/blog.html \
+         --pillar https://biglobster.top/agents.html \
+         --pillar https://biglobster.top/clientes.html \
+         --merge
+   `--merge` preserva keyword_url_map/cannibalization de la corrida anterior.
+   Revisa el stdout: imprime `pages=… orphans=… commit=…`.
+2. Lee `/opt/data/profiles/biglobster/seo/site-state.json` (tool `read_file` o
+   `terminal cat`) para tus decisiones del día. NO lo edites con python -c.
+3. (Opcional) Aumenta `keyword_url_map` con UNA consulta GSC (query→página, 30d) y
+   recalcula `cannibalization` (queries con ≥2 URLs distintas); reescribe el archivo
+   con el tool `write_file` (NUNCA con `python3 -c`).
+4. Si el constructor falla (p.ej. `Permission denied`, script ausente, o
+   `web-dir not found`): regístralo como ALERTA en el reporte y CONTINÚA con el
+   ledger por-URL. Un site-state ausente NO debe abortar el ciclo.
 
 Uso (NO sustituye a ninguna acción; les da señal persistente y cross-run):
 - El trigger de huérfanos ([DETECCIÓN DE DELTAS] #3) y `Flag_canibalización` del
