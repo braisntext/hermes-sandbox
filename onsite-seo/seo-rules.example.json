@@ -1,0 +1,10 @@
+[
+  {
+    "rule_id": "RULE-2026-001",
+    "descripcion": "Toda URL debe tener etiquetas Open Graph y Twitter Card completas (Acción 10), derivadas del contenido real de la página.",
+    "alcance": "todas",
+    "accion_asociada": "open_graph",
+    "fecha_alta": "2026-06-28",
+    "propagacion_pendiente": true
+  }
+]
