@@ -1,3 +1,47 @@
+# Per-run isolated checkouts for cron agents
+
+## Problem
+Cron agents (biglobster SEO, gap-hunter) share ONE physical git working tree
+`/opt/data/biglobster` as their `workdir`. Uncommitted edits from agent A survive
+in the shared tree and agent B's "clean tree" protocol (`git checkout -- <tracked>`)
+reverts them. Near-miss data loss 2026-06-28 (Langfuse 97a19e01 / 31df12d734bf...).
+The mailbox page-lock is a JSON advisory lock — it does NOT lock the filesystem.
+
+## Decisions (locked with CEO)
+- Mechanism: **local clone per run** (`git clone --local`), the proven gap-hunter
+  `/tmp/biglobster-pr` pattern.
+- Scope: **auto for any agent job whose `workdir` is a git working tree**. No per-job
+  opt-in. (no_agent script jobs are OUT of scope — they use absolute paths and are
+  read-mostly; auto-cloning them is high-risk/low-value.)
+
+## Design
+Scheduler provisions an ephemeral local clone before each git-workdir AGENT run,
+points `TERMINAL_CWD` at it, removes it after. Agent physically cannot reach the
+shared tree, so cross-agent clobbering is impossible. A fresh clone always starts
+from clean committed `origin/main`, so prior-run leftovers vanish too.
+
+## Tasks
+- [ ] `cron/scheduler.py`: add `tempfile` import.
+- [ ] `cron/scheduler.py`: `_is_git_worktree(path)` helper.
+- [ ] `cron/scheduler.py`: `_provision_isolated_checkout(job, workdir) -> (eff, cleanup)`
+      kill-switch `HERMES_CRON_ISOLATE_WORKDIR=0/false/no`; non-git/missing -> passthrough;
+      else mkdtemp under `HERMES_CRON_CHECKOUT_DIR` or tempdir, `git clone --local`,
+      set origin to source's origin URL, copy `user.*`+`credential.*` local config.
+      Clone failure -> **fail-closed** (abort run; never run a write-agent on shared tree).
+- [ ] Wire into AGENT run path (~scheduler.py:1548); clean up in existing `finally` (~1910).
+- [ ] `_sweep_stale_checkouts(base, max_age_h=6)` once per `tick()` — reap crashed-run dirs.
+- [ ] `onsite-seo/seo-agent.prompt`: stop hardcoding `/opt/data/biglobster`; use run workdir.
+      Simplify PASO 0 (fresh clone => no leftovers). Keep per-URL atomic commit+push.
+- [ ] `tests/test_cron_isolated_checkout.py`: detection, provisioning, isolation from a
+      DIRTY source (the incident), origin/identity copy, cleanup, kill-switch, passthrough.
+
+## Out of scope / follow-up
+- Live jobs.json prompt is INDEPENDENT of repo `.prompt` — SEO prompt edit needs redeploy.
+- Concurrent pushes to `main` from two clones can race (non-ff). Pre-existing; not fixed here.
+- no_agent git-workdir jobs left on shared tree by design.
+
+---
+
 # Auditor Agent — implementation plan
 
 A second-LLM technical reviewer that validates and improves changes before they
