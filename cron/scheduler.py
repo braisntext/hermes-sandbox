@@ -1366,6 +1366,28 @@ def _git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> subproces
     )
 
 
+def _strip_url_credentials(url: str) -> str:
+    """Remove an embedded ``user:secret@`` segment from an http(s) remote URL.
+
+    A PAT baked into the source tree's origin (``https://x-access-token:TOKEN@
+    github.com/owner/repo.git``) would otherwise be copied verbatim into every
+    ephemeral clone's ``.git/config`` — plaintext token on disk per run. We keep
+    the remote tokenless and let the credential helper (copied alongside) supply
+    the token at push time. SSH (``git@…``), local paths, and already-tokenless
+    URLs are returned unchanged.
+    """
+    for scheme in ("https://", "http://"):
+        if url.startswith(scheme):
+            rest = url[len(scheme):]
+            at = rest.find("@")
+            slash = rest.find("/")
+            # Only the "@" before the first path "/" delimits userinfo.
+            if at != -1 and (slash == -1 or at < slash):
+                return scheme + rest[at + 1:]
+            return url
+    return url
+
+
 def _provision_isolated_checkout(
     job_id: str, profile: Optional[str], workdir: str
 ) -> tuple[str, Optional[str]]:
@@ -1417,7 +1439,10 @@ def _provision_isolated_checkout(
         # origin to the source path otherwise.
         src_origin = _git(["remote", "get-url", "origin"], cwd=workdir)
         if src_origin.returncode == 0 and src_origin.stdout.strip():
-            _git(["remote", "set-url", "origin", src_origin.stdout.strip()], cwd=ephemeral)
+            # Strip any embedded PAT so the clone's .git/config stays tokenless;
+            # the copied credential helper (below) resolves auth at push time.
+            clean_origin = _strip_url_credentials(src_origin.stdout.strip())
+            _git(["remote", "set-url", "origin", clean_origin], cwd=ephemeral)
 
         # A fresh clone inherits no local config — copy commit identity and any
         # credential helper so commit+push behave exactly as on the shared tree.
