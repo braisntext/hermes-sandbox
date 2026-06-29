@@ -778,6 +778,33 @@ for ckdir in biglobster-seo biglobster-gaphunter biglobster-infographic; do
     fi
 done
 
+# --- 6b-bis: strip embedded PATs from legacy top-level shared trees ----------
+# Trees living DIRECTLY under $HERMES_HOME (e.g. /opt/data/biglobster — the
+# SEO + Gap Hunter source tree the scheduler clones per-run) historically had a
+# PAT baked into their origin URL:
+#   https://x-access-token:TOKEN@github.com/owner/repo.git
+# That plaintext token sits in .git/config AND was copied verbatim into every
+# ephemeral per-run clone by cron/scheduler.py's _provision_isolated_checkout
+# (the scheduler now strips it defensively too, but we fix the source of truth
+# here). Sections 6/6b already keep the workspace + checkouts trees tokenless;
+# this closes the one remaining class — top-level trees no other section owns.
+# Auth stays ambient via the section-4 credential helper (global HOME=$HERMES_HOME
+# store + ~/.git-credentials), so a tokenless remote still pushes. The loop only
+# touches direct children of $HERMES_HOME that are git working trees with an
+# http(s) origin carrying a "user:secret@" segment. Idempotent + non-fatal.
+for top in "$HERMES_HOME"/*/; do
+    [ -e "${top}.git" ] || continue
+    cur=$(HOME="$HERMES_HOME" as_hermes git -C "$top" remote get-url origin 2>/dev/null) || continue
+    case "$cur" in
+        https://*@github.com/*|http://*@github.com/*)
+            clean=$(printf '%s\n' "$cur" | sed -E 's#^(https?://)[^/@]*@#\1#')
+            HOME="$HERMES_HOME" as_hermes git -C "$top" remote set-url origin "$clean" 2>/dev/null \
+                && echo "[03-biglobster] Stripped token from remote: ${top%/}" \
+                || echo "[03-biglobster] Warning: could not normalize remote for ${top%/} (non-fatal)"
+            ;;
+    esac
+done
+
 # --- 6c: install the managed git guard into every agent clone (every boot) ---
 # Why: on 2026-06-22 a blind `git add -A && git commit` (commit dd0e1f5) captured
 # the deletion of 48 cover/infographic images in braisntext/biglobster while the

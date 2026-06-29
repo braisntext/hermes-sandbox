@@ -134,6 +134,27 @@ class TestProvisionClone:
         finally:
             _cleanup_isolated_checkout(cleanup)
 
+    def test_tokenized_source_origin_stripped_in_clone(self, source_repo, checkout_base):
+        """A PAT baked into the source tree's origin URL must NOT land in the
+        ephemeral clone's .git/config — the leak this migration closes."""
+        from cron.scheduler import _provision_isolated_checkout, _cleanup_isolated_checkout
+
+        _git(
+            ["remote", "set-url", "origin",
+             "https://x-access-token:github_pat_SECRET123@github.com/braisntext/biglobster.git"],
+            source_repo,
+        )
+        eff, cleanup = _provision_isolated_checkout("jobA", "bl", str(source_repo))
+        try:
+            url = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=eff, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            assert url == "https://github.com/braisntext/biglobster.git"
+            assert "github_pat_SECRET123" not in (Path(eff) / ".git" / "config").read_text()
+        finally:
+            _cleanup_isolated_checkout(cleanup)
+
     def test_commit_identity_copied(self, source_repo, checkout_base):
         from cron.scheduler import _provision_isolated_checkout, _cleanup_isolated_checkout
         eff, cleanup = _provision_isolated_checkout("jobA", "bl", str(source_repo))
@@ -169,6 +190,24 @@ class TestProvisionClone:
             assert dirty.read_text() == "<h1>AGENT-A-UNCOMMITTED</h1>\n"
         finally:
             _cleanup_isolated_checkout(cleanup)
+
+
+# ---------------------------------------------------------------------------
+# _strip_url_credentials
+# ---------------------------------------------------------------------------
+
+class TestStripUrlCredentials:
+    @pytest.mark.parametrize("url, expected", [
+        ("https://x-access-token:github_pat_ABC@github.com/o/r.git",
+         "https://github.com/o/r.git"),
+        ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+        ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+        ("/opt/data/biglobster", "/opt/data/biglobster"),
+        ("https://user:p%40ss@github.com/o/r.git", "https://github.com/o/r.git"),
+    ])
+    def test_strip(self, url, expected):
+        from cron.scheduler import _strip_url_credentials
+        assert _strip_url_credentials(url) == expected
 
 
 # ---------------------------------------------------------------------------
