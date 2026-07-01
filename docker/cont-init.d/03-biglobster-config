@@ -703,6 +703,14 @@ if [ -d "$HERMES_HOME/profiles" ]; then
                 HOME="$HERMES_HOME" as_hermes git -C "$target" remote set-url origin \
                     "https://github.com/$repo.git" 2>/dev/null || true
                 echo "[03-biglobster] Pulling $repo"
+                # A cron job (e.g. Content Gap Hunter) can leave this clone on a
+                # feature branch after opening a PR. --ff-only then fails with
+                # "Not possible to fast-forward" against that branch's moved/
+                # squashed remote history — same failure mode section 6b hit
+                # for the BigLobster site checkouts. Land back on main first;
+                # non-fatal like every other step here.
+                HOME="$HERMES_HOME" as_hermes git -C "$target" checkout --quiet main 2>/dev/null \
+                    || echo "[03-biglobster] Warning: checkout main failed for $repo (non-fatal)"
                 HOME="$HERMES_HOME" as_hermes timeout 120 git -C "$target" pull --ff-only --quiet 2>&1 \
                     || echo "[03-biglobster] Warning: git pull failed/timed out for $repo (non-fatal)"
             else
