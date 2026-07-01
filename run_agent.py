@@ -1361,15 +1361,27 @@ class AIAgent:
         returns the thread target.  ``threading.Thread`` is constructed
         here so existing tests that patch ``run_agent.threading.Thread``
         keep working.
+
+        The target is wrapped with ``propagate_context_to_thread`` so this
+        thread inherits the parent's ``contextvars`` — notably the cron
+        scheduler's per-job ``HERMES_HOME`` profile override (see
+        ``cron.scheduler._job_profile_context``). A bare thread starts with
+        an empty context, so a profile-scoped cron job's bg-review step
+        would silently resolve skills against the default profile instead
+        of its own (e.g. "Skill 'seo-geo-audit' not found in active
+        profile 'default'" for a job configured with profile='biglobster').
         """
         from agent.background_review import spawn_background_review_thread
+        from tools.thread_context import propagate_context_to_thread
         target, _prompt = spawn_background_review_thread(
             self,
             messages_snapshot,
             review_memory=review_memory,
             review_skills=review_skills,
         )
-        t = threading.Thread(target=target, daemon=True, name="bg-review")
+        t = threading.Thread(
+            target=propagate_context_to_thread(target), daemon=True, name="bg-review"
+        )
         t.start()
 
     def _build_memory_write_metadata(
